@@ -87,7 +87,7 @@ const getProducts = async () => {
           return null;
         });
 
-        const returnable = await productPage.evaluate(async () => {
+        const returnable = await productPage.evaluate(() => {
           const elements = Array.from(
             document.querySelectorAll(".cargo-status_item__PdgOr span")
           );
@@ -113,6 +113,14 @@ const getProducts = async () => {
           return desc;
         });
 
+        const categories = await productPage.evaluate(() => {
+          const target = document.querySelectorAll(
+            ".breadcrumb_itemLists__O62id ul li"
+          );
+          const categories = target.map((el) => el.textContent);
+          return categories;
+        });
+
         await productPage.close();
 
         // Add targetElement information to products
@@ -125,6 +133,7 @@ const getProducts = async () => {
           currency,
           returnable,
           description,
+          categories,
         });
       }
     }
