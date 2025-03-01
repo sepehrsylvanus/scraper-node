@@ -102,6 +102,17 @@ const getProducts = async () => {
           }
         });
 
+        const description = await productPage.evaluate(async () => {
+          const target = document.querySelector(
+            ".product-information-card_showButton__cho9w"
+          );
+          target.click();
+          const desc = document.querySelector(
+            ".product-information-card_content__Nf_Hn"
+          ).innerHTML;
+          return desc;
+        });
+
         await productPage.close();
 
         // Add targetElement information to products
@@ -113,6 +124,7 @@ const getProducts = async () => {
           shipping_fee,
           currency,
           returnable,
+          description,
         });
       }
     }
