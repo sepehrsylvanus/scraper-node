@@ -114,11 +114,11 @@ const getProducts = async () => {
         });
 
         const categories = await productPage.evaluate(() => {
-          const target = document.querySelectorAll(
-            ".breadcrumb_itemLists__O62id ul li"
+          const target = Array.from(
+            document.querySelectorAll(".breadcrumb_itemLists__O62id ul li")
           );
           const categories = target.map((el) => el.textContent);
-          return categories;
+          return categories.join(">");
         });
 
         await productPage.close();
