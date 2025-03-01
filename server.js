@@ -87,7 +87,20 @@ const getProducts = async () => {
           return null;
         });
 
-        // Log the collected information
+        const returnable = await productPage.evaluate(async () => {
+          const elements = Array.from(
+            document.querySelectorAll(".cargo-status_item__PdgOr span")
+          );
+          const targetElement = elements.find((el) =>
+            el.textContent.includes("İade")
+          );
+
+          if (targetElement) {
+            return true;
+          } else {
+            return false;
+          }
+        });
 
         await productPage.close();
 
@@ -99,6 +112,7 @@ const getProducts = async () => {
           url,
           shipping_fee,
           currency,
+          returnable,
         });
       }
     }
