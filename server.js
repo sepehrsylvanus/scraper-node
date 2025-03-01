@@ -98,6 +98,7 @@ const getProducts = async () => {
           price,
           url,
           shipping_fee,
+          currency,
         });
       }
     }
