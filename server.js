@@ -4,7 +4,6 @@ const fs = require("fs");
 const path = require("path");
 
 const outputFilePath = path.join(__dirname, "products.json");
-const userDataDir = path.join(__dirname, "user_data");
 
 let browser, page;
 const getProducts = async () => {
@@ -56,7 +55,56 @@ const getProducts = async () => {
           timeout: 86400000,
         });
 
-        // Click on the desired element and collect information
+        // Wait until the actual image src is loaded
+        await productPage.waitForFunction(
+          () => {
+            const img = document.querySelector(
+              ".product-image-layout_imageBig__8TB1z.product-image-layout_lbEnabled__IfV9T span img[data-nimg='intrinsic']"
+            );
+            return (
+              img &&
+              img.src.startsWith("https://statics-mp.boyner.com.tr") &&
+              !img.src.includes("data:image/svg+xml")
+            );
+          },
+          { timeout: 86400000 }
+        );
+
+        const content = await productPage.content();
+        const $$ = cheerio.load(content);
+
+        const image1 = $$(
+          ".product-image-layout_imageBig__8TB1z.product-image-layout_lbEnabled__IfV9T span img[data-nimg='intrinsic']"
+        ).attr("src");
+
+        await productPage.evaluate(() => {
+          window.scrollBy(0, 700);
+        });
+        await productPage.waitForFunction(
+          () => {
+            const img = document.querySelector(
+              ".product-image-layout_otherImages__KwpFh div span img[data-nimg='intrinsic']"
+            );
+            return (
+              img &&
+              img.src.startsWith("https://statics-mp.boyner.com.tr") &&
+              !img.src.includes("data:image/svg+xml")
+            );
+          },
+          { timeout: 86400000 }
+        );
+
+        const images = await productPage.evaluate(() => {
+          const images = Array.from(
+            document.querySelectorAll(
+              ".product-image-layout_otherImages__KwpFh div span img[data-nimg='intrinsic']"
+            )
+          );
+          const imageUrls = images.map((image) => image.src);
+          return imageUrls.join(";");
+        });
+
+        // Collect additional product details
         const shipping_fee = await productPage.evaluate(async () => {
           const elements = Array.from(
             document.querySelectorAll(".tabs_title__gO9Hr")
@@ -68,10 +116,8 @@ const getProducts = async () => {
           if (targetElement) {
             targetElement.click();
 
-            // Wait for the modal content to be rendered
-            await new Promise((resolve) => setTimeout(resolve, 2000)); // Adjust the timeout based on the modal loading time
+            await new Promise((resolve) => setTimeout(resolve, 2000));
 
-            // Collect information from the modal
             const shipping_fee = parseFloat(
               document
                 .querySelector(
@@ -123,7 +169,7 @@ const getProducts = async () => {
 
         await productPage.close();
 
-        // Add targetElement information to products
+        // Add product information to products array
         products.push({
           title,
           brand,
@@ -134,14 +180,11 @@ const getProducts = async () => {
           returnable,
           description,
           categories,
+          images: image1 + ";" + images,
         });
       }
     }
 
-    // Scroll down
-    await page.evaluate(() => window.scrollBy(0, 200));
-
-    // Save products to JSON file
     fs.writeFileSync(outputFilePath, JSON.stringify(products, null, 2));
 
     await browser.close();
