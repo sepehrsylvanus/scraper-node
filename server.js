@@ -59,6 +59,7 @@ const scrapeProducts = async () => {
 
     let products = [];
     let scrapedProductUrls = new Set(); // Track scraped URLs to avoid duplicates
+    let productCounter = 0; // Counter to track processed products
 
     while (true) {
       console.log("Extracting product information...");
@@ -104,6 +105,13 @@ const scrapeProducts = async () => {
             waitUntil: "networkidle2",
             timeout: 60000,
           });
+
+          // Scroll down a bit to trigger lazy loading of images
+          await productPage.evaluate(() => {
+            window.scrollBy(0, 500); // Adjust the scroll amount as needed
+          });
+          await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait for images to load
+
           const productContent = await productPage.content();
           const $$ = cheerio.load(productContent);
 
@@ -246,6 +254,16 @@ const scrapeProducts = async () => {
 
           // Close the product page
           await productPage.close();
+
+          // Increment the product counter
+          productCounter++;
+
+          // Scroll down after every 4 products
+          if (productCounter % 4 === 0) {
+            console.log("Scrolling down 200px...");
+            await page.evaluate(() => window.scrollBy(0, 200));
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
         } catch (productError) {
           console.error(`Error processing product: ${productUrl}`);
           console.error(productError.message);
@@ -253,13 +271,9 @@ const scrapeProducts = async () => {
         }
       }
 
-      console.log("Scrolling down 200px...");
-      await page.evaluate(() => window.scrollBy(0, 200));
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
       // Check if the footer is visible
       const footerVisible = await isElementInViewport(
-        ".footer-mini-slider_list__pqC2n"
+        ".footer-mini-slider_listBox__UzO2D"
       );
       if (footerVisible) {
         console.log(
@@ -273,6 +287,20 @@ const scrapeProducts = async () => {
           console.log("New products found! Continuing...");
         } else {
           console.log("No new products found after 10 seconds. Stopping...");
+          break;
+        }
+      } else {
+        // If the footer is not visible, scroll down and wait for new products
+        console.log("Scrolling down to load more products...");
+        await page.evaluate(() => window.scrollBy(0, 500));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // Check if new products have been loaded after scrolling
+        const currentProductCount = (await page.$$(".listProductItem")).length;
+        if (currentProductCount > scrapedProductUrls.size) {
+          console.log("New products found! Continuing...");
+        } else {
+          console.log("No new products found after scrolling. Stopping...");
           break;
         }
       }
