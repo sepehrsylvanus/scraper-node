@@ -152,7 +152,26 @@ const scrapeProducts = async () => {
 
       for (const element of elements) {
         if (shouldStop) break;
-
+        const title = $(element)
+          .find(".product-item_name__HVuFo")
+          .text()
+          .trim();
+        const brand = $(element)
+          .find(".product-item_brand__LFImW")
+          .text()
+          .trim();
+        const price = parseFloat(
+          $(element)
+            .find(".product-price_checkPrice__NMY9e strong")
+            .text()
+            .trim()
+            .match(/(\d+(\.\d+)?)/)[0]
+        );
+        const currency = $(element)
+          .find(".product-price_checkPrice__NMY9e strong")
+          .text()
+          .trim()
+          .match(/[^\d\s]+/)[0];
         const productUrl =
           "https://www.boyner.com.tr/" +
           $(element).find(".product-item_image__IxD4T a").attr("href");
@@ -166,7 +185,134 @@ const scrapeProducts = async () => {
             waitUntil: "networkidle2",
             timeout: 120000,
           });
+          const productContent = await productPage.content();
+          const $$ = cheerio.load(productContent);
+          const image1 = $$(
+            '.product-image-layout_imageBig__8TB1z.product-image-layout_lbEnabled__IfV9T span img[data-nimg="intrinsic"]'
+          ).attr("src");
 
+          const otherImages = await productPage.evaluate(() => {
+            const images = Array.from(
+              document.querySelectorAll(
+                '.product-image-layout_otherImages__KwpFh .product-image-layout_imageSmall__gQdZ_ span img[data-nimg="intrinsic"]'
+              )
+            );
+            const imgUrls = images.map((img) => img.getAttribute("src"));
+            return imgUrls.join(";") || ""; // Return empty string if no images
+          });
+
+          const rating = await productPage.evaluate(async () => {
+            const ratingModal = document.querySelector(
+              ".rating-custom_reviewText__EUE7E"
+            );
+            if (ratingModal) {
+              ratingModal.click();
+              await new Promise((resolve) => setTimeout(() => resolve(), 3000));
+              const rating = parseFloat(
+                document.querySelector(".score-summary_score__VrQrb")
+              );
+              const closeBtn = document.querySelector(".icon-close");
+              closeBtn.click();
+              return rating || "No rating"; // Default if no rating
+            } else {
+              return "No rating"; // Return default value if modal doesn't exist
+            }
+          });
+
+          const shipping_fee = await productPage.evaluate(async () => {
+            const target = Array.from(
+              document.querySelectorAll(".tabs_title__gO9Hr")
+            ).find((element) =>
+              element.textContent.includes("Teslimat Bilgileri")
+            );
+            if (target) {
+              target.click();
+              await new Promise((resolve) => setTimeout(() => resolve(), 3000));
+              const shippingFee = parseFloat(
+                document
+                  .querySelector(
+                    ".delivery-information_wrapper__Ek_Uy div span strong"
+                  )
+                  .textContent.match(/[\d,]+(\.[\d]+)?/)[0]
+              );
+              const closeBtn = document.querySelector(
+                ".tab-modal_closeIcon__gUYKw"
+              );
+              closeBtn.click();
+              return shippingFee || "No shipping fee"; // Return default if no shipping fee found
+            } else {
+              return "No shipping fee"; // Return default if element doesn't exist
+            }
+          });
+
+          const { description, specs2 } = await productPage.evaluate(
+            async () => {
+              let elementDescription, specification;
+
+              const target = document.querySelector(
+                ".product-information-card_showButton__cho9w"
+              );
+              if (target) {
+                target.click();
+                await new Promise((resolve) =>
+                  setTimeout(() => resolve(), 3000)
+                );
+
+                // Get description
+                const descriptionElements = Array.from(
+                  document.querySelectorAll(
+                    ".product-information-card_content__Nf_Hn .product-information-card_subContainer__gQn9A"
+                  )
+                );
+                elementDescription = descriptionElements.find(
+                  (element) =>
+                    element.querySelector("h2") &&
+                    element
+                      .querySelector("h2")
+                      .textContent.includes("Ürün Açıklaması")
+                );
+
+                // Get specifications
+                const specs = Array.from(
+                  document.querySelectorAll(
+                    ".product-information-card_tableWrapper__mLIy4 div"
+                  )
+                );
+                specification = specs
+                  .map((eachSpec) => {
+                    const name = eachSpec
+                      .querySelector("label")
+                      ?.textContent?.trim();
+                    const value = eachSpec
+                      .querySelector("span")
+                      ?.textContent?.trim();
+                    return { name, value };
+                  })
+                  .filter((spec) => spec.name && spec.value); // Filter out empty or incomplete specs
+              }
+
+              // Return values, ensure that description and specs2 are properly handled
+              return {
+                description: elementDescription
+                  ? elementDescription.textContent.trim()
+                  : "No description found",
+                specs2:
+                  specification.length > 0
+                    ? specification
+                    : "No specifications found",
+              };
+            }
+          );
+
+          const categories = await productPage.evaluate(() => {
+            const categories = Array.from(
+              document.querySelectorAll(".breadcrumb_itemLists__O62id ul li")
+            );
+            const categoriesText = categories.map((category) =>
+              category.textContent.trim()
+            );
+            return categoriesText.join(">");
+          });
           // Your existing product scraping logic
           const product = {
             title,
