@@ -169,8 +169,17 @@ const scrapeProducts = async () => {
 
           // Your existing product scraping logic
           const product = {
-            // Your product object construction
-            // Ensure this matches your previous implementation
+            title,
+            brand,
+            price,
+            currency,
+            productUrl,
+            images: image1 + ";" + otherImages,
+            rating,
+            shipping_fee,
+            description,
+            specifications: specs2,
+            categories,
           };
 
           console.log(`Processing product: ${product.title}`);
