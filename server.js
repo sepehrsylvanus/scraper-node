@@ -251,6 +251,15 @@ const scrapeProducts = async () => {
                 : "No specifications found",
           };
         });
+        const categories = await productPage.evaluate(() => {
+          const categories = Array.from(
+            document.querySelectorAll(".breadcrumb_itemLists__O62id ul li")
+          );
+          const categoryTexts = categories.map(
+            (category) => category.textContent
+          );
+          return categoryTexts.join(">");
+        });
 
         const product = {
           title,
@@ -263,6 +272,7 @@ const scrapeProducts = async () => {
           shipping_fee,
           description,
           specifications: specs2,
+          categories,
         };
 
         console.log(`Processing product: ${title}`);
