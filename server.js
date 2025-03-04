@@ -108,9 +108,9 @@ const scrapeProducts = async () => {
 
           // Scroll down a bit to trigger lazy loading of images
           await productPage.evaluate(() => {
-            window.scrollBy(0, 500); // Adjust the scroll amount as needed
+            window.scrollBy(0, 200); // Adjust the scroll amount as needed
           });
-          await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait for images to load
+          await new Promise((resolve) => setTimeout(resolve, 2500)); // Wait for images to load
 
           const productContent = await productPage.content();
           const $$ = cheerio.load(productContent);
@@ -262,7 +262,7 @@ const scrapeProducts = async () => {
           if (productCounter % 4 === 0) {
             console.log("Scrolling down 200px...");
             await page.evaluate(() => window.scrollBy(0, 200));
-            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await new Promise((resolve) => setTimeout(resolve, 3000));
           }
         } catch (productError) {
           console.error(`Error processing product: ${productUrl}`);
