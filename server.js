@@ -53,7 +53,7 @@ const scrapeProducts = async () => {
     const url = process.argv[2];
 
     // Ensure we reconnect if needed and set a longer timeout
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
 
     console.log("Navigated to the page");
 
@@ -103,14 +103,14 @@ const scrapeProducts = async () => {
           productPage = await browser.newPage();
           await productPage.goto(productUrl, {
             waitUntil: "networkidle2",
-            timeout: 60000,
+            timeout: 120000,
           });
 
           // Scroll down a bit to trigger lazy loading of images
           await productPage.evaluate(() => {
             window.scrollBy(0, 500); // Adjust the scroll amount as needed
           });
-          await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait for images to load
+          await new Promise((resolve) => setTimeout(resolve, 3000)); // Wait for images to load
 
           const productContent = await productPage.content();
           const $$ = cheerio.load(productContent);
@@ -135,7 +135,7 @@ const scrapeProducts = async () => {
             );
             if (ratingModal) {
               ratingModal.click();
-              await new Promise((resolve) => setTimeout(() => resolve(), 2000));
+              await new Promise((resolve) => setTimeout(() => resolve(), 3000));
               const rating = parseFloat(
                 document.querySelector(".score-summary_score__VrQrb")
               );
@@ -155,7 +155,7 @@ const scrapeProducts = async () => {
             );
             if (target) {
               target.click();
-              await new Promise((resolve) => setTimeout(() => resolve(), 2000));
+              await new Promise((resolve) => setTimeout(() => resolve(), 3000));
               const shippingFee = parseFloat(
                 document
                   .querySelector(
@@ -183,7 +183,7 @@ const scrapeProducts = async () => {
               if (target) {
                 target.click();
                 await new Promise((resolve) =>
-                  setTimeout(() => resolve(), 2000)
+                  setTimeout(() => resolve(), 3000)
                 );
 
                 // Get description
@@ -232,6 +232,16 @@ const scrapeProducts = async () => {
             }
           );
 
+          const categories = await productPage.evaluate(() => {
+            const categories = Array.from(
+              document.querySelectorAll(".breadcrumb_itemLists__O62id ul li")
+            );
+            const categoriesText = categories.map((category) =>
+              category.textContent.trim()
+            );
+            return categoriesText.join(">");
+          });
+
           const product = {
             title,
             brand,
@@ -243,6 +253,7 @@ const scrapeProducts = async () => {
             shipping_fee,
             description,
             specifications: specs2,
+            categories,
           };
 
           console.log(`Processing product: ${title}`);
@@ -262,7 +273,7 @@ const scrapeProducts = async () => {
           if (productCounter % 4 === 0) {
             console.log("Scrolling down 200px...");
             await page.evaluate(() => window.scrollBy(0, 200));
-            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await new Promise((resolve) => setTimeout(resolve, 2000));
           }
         } catch (productError) {
           console.error(`Error processing product: ${productUrl}`);
@@ -277,23 +288,23 @@ const scrapeProducts = async () => {
       );
       if (footerVisible) {
         console.log(
-          "Footer is visible, waiting 10 seconds for new products to load..."
+          "Footer is visible, waiting 15 seconds for new products to load..."
         );
-        await new Promise((resolve) => setTimeout(resolve, 10000));
+        await new Promise((resolve) => setTimeout(resolve, 15000));
 
         // Check if new products have been loaded
         const currentProductCount = (await page.$$(".listProductItem")).length;
         if (currentProductCount > scrapedProductUrls.size) {
           console.log("New products found! Continuing...");
         } else {
-          console.log("No new products found after 10 seconds. Stopping...");
+          console.log("No new products found after 15 seconds. Stopping...");
           break;
         }
       } else {
         // If the footer is not visible, scroll down and wait for new products
         console.log("Scrolling down to load more products...");
         await page.evaluate(() => window.scrollBy(0, 500));
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 3000));
 
         // Check if new products have been loaded after scrolling
         const currentProductCount = (await page.$$(".listProductItem")).length;
