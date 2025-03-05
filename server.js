@@ -4,8 +4,13 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 
-const outputFilePath = path.join(__dirname, "products.json");
-let browser, page;
+const outputDir = path.join(__dirname, "output");
+// Ensure output directory exists
+if (!fs.existsSync(outputDir)) {
+  fs.mkdirSync(outputDir);
+}
+
+let browser;
 let shouldStop = false;
 
 // Enable keyboard interrupt handling
@@ -64,8 +69,8 @@ const advancedInfiniteScroll = async (page) => {
   return await page.evaluate(async () => {
     return await new Promise((resolve) => {
       let totalHeight = 0;
-      const scrollDistance = 1000;
-      const maxScrollAttempts = 20;
+      const scrollDistance = 200;
+      const maxScrollAttempts = 1000000;
       let scrollAttempts = 0;
       let lastHeight = document.body.scrollHeight;
 
@@ -96,22 +101,13 @@ const advancedInfiniteScroll = async (page) => {
           clearInterval(scrollInterval);
           resolve(true);
         }
-      }, 500);
+      }, 1000);
     });
   });
 };
 
-const scrapeProducts = async () => {
+const scrapeProductsFromUrl = async (page, url) => {
   try {
-    browser = await launchBrowser();
-    page = await browser.newPage();
-    const url = process.argv[2];
-
-    if (!url) {
-      console.error("Please provide a URL as an argument");
-      process.exit(1);
-    }
-
     // Configure page to load faster and handle lazy loading
     await page.setDefaultNavigationTimeout(120000);
     await page.setDefaultTimeout(120000);
@@ -120,8 +116,7 @@ const scrapeProducts = async () => {
       waitUntil: ["networkidle0", "domcontentloaded"],
       timeout: 120000,
     });
-    console.log("Navigated to the page");
-    console.log("Press 'q' at any time to stop scraping");
+    console.log(`Navigated to the page: ${url}`);
 
     // Scroll and wait for content to load
     await advancedInfiniteScroll(page);
@@ -130,8 +125,18 @@ const scrapeProducts = async () => {
     let products = [];
     let scrapedProductUrls = new Set();
     let productCounter = 0;
-    const MAX_ITERATIONS = 20;
+    const MAX_ITERATIONS = 2;
     let iterations = 0;
+
+    // Create a sanitized filename from the URL
+    const sanitizedFilename = url
+      .replace(/https?:\/\//, "")
+      .replace(/[^a-z0-9]/gi, "_")
+      .toLowerCase();
+    const outputFilePath = path.join(
+      outputDir,
+      `${sanitizedFilename}_products.json`
+    );
 
     while (!shouldStop && iterations < MAX_ITERATIONS) {
       console.log(`Iteration ${iterations + 1}`);
@@ -194,10 +199,19 @@ const scrapeProducts = async () => {
           const otherImages = await productPage.evaluate(() => {
             const images = Array.from(
               document.querySelectorAll(
-                '.product-image-layout_otherImages__KwpFh .product-image-layout_imageSmall__gQdZ_ span img[data-nimg="intrinsic"]'
+                '.product-image-layout_otherImages__KwpFh .product-image-layout_imageSmall__gQdZ_ img[data-nimg="intrinsic"]'
               )
             );
-            const imgUrls = images.map((img) => img.getAttribute("src"));
+
+            // Extract src directly from images with data-nimg="intrinsic"
+            const imgUrls = images
+              .map((img) => {
+                // Prioritize actual image source over placeholder
+                const src = img.getAttribute("src");
+                return src && !src.startsWith("data:") ? src : null;
+              })
+              .filter((src) => src); // Remove null values
+
             return imgUrls.join(";") || ""; // Return empty string if no images
           });
 
@@ -313,7 +327,7 @@ const scrapeProducts = async () => {
             );
             return categoriesText.join(">");
           });
-          // Your existing product scraping logic
+
           const product = {
             title,
             brand,
@@ -360,18 +374,67 @@ const scrapeProducts = async () => {
       if (shouldStop) break;
     }
 
-    console.log(`Total products processed: ${productCounter}`);
+    console.log(`Total products processed for ${url}: ${productCounter}`);
+    return products;
+  } catch (error) {
+    console.error(`Error scraping ${url}:`, error.message);
+    return [];
+  }
+};
 
-    // Save final results
-    fs.writeFileSync(outputFilePath, JSON.stringify(products, null, 2));
+const scrapeMultipleUrls = async () => {
+  try {
+    // Determine input source
+    let urls = [];
+    if (process.argv[2] === "--file") {
+      // Read URLs from a file
+      const filePath = process.argv[3];
+      if (!filePath) {
+        console.error("Please provide a file path with URLs when using --file");
+        process.exit(1);
+      }
+      urls = fs
+        .readFileSync(filePath, "utf-8")
+        .split("\n")
+        .map((url) => url.trim())
+        .filter((url) => url); // Remove empty lines
+    } else {
+      // Use URLs from command-line arguments
+      urls = process.argv.slice(2);
+    }
 
+    if (urls.length === 0) {
+      console.error("Please provide URLs as arguments or in a file");
+      process.exit(1);
+    }
+
+    // Launch browser once
+    browser = await launchBrowser();
+
+    // Process each URL
+    for (const url of urls) {
+      if (shouldStop) break;
+
+      console.log(`\n--- Starting scraping for URL: ${url} ---`);
+      const page = await browser.newPage();
+
+      try {
+        await scrapeProductsFromUrl(page, url);
+      } catch (urlError) {
+        console.error(`Error processing URL ${url}:`, urlError.message);
+      } finally {
+        await page.close();
+      }
+    }
+
+    // Close browser
     await browser.close();
     process.exit(0);
   } catch (error) {
-    console.log("Error encountered:", error.message);
+    console.error("Overall scraping error:", error);
     if (browser) await browser.close();
     process.exit(1);
   }
 };
 
-scrapeProducts();
+scrapeMultipleUrls();
