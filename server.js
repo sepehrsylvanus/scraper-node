@@ -69,8 +69,8 @@ const advancedInfiniteScroll = async (page) => {
   return await page.evaluate(async () => {
     return await new Promise((resolve) => {
       let totalHeight = 0;
-      const scrollDistance = 200;
-      const maxScrollAttempts = 1000000;
+      const scrollDistance = 100;
+      const maxScrollAttempts = 10000;
       let scrollAttempts = 0;
       let lastHeight = document.body.scrollHeight;
 
@@ -197,6 +197,7 @@ const scrapeProductsFromUrl = async (page, url) => {
           ).attr("src");
 
           const otherImages = await productPage.evaluate(() => {
+            window.scrollBy(0, window.innerHeight);
             const images = Array.from(
               document.querySelectorAll(
                 '.product-image-layout_otherImages__KwpFh .product-image-layout_imageSmall__gQdZ_ img[data-nimg="intrinsic"]'
@@ -325,8 +326,11 @@ const scrapeProductsFromUrl = async (page, url) => {
             const categoriesText = categories.map((category) =>
               category.textContent.trim()
             );
-            return categoriesText.join(">");
+            const lastIndex = fullString.lastIndexOf(">");
+            return categoriesText.substring(0, lastIndex);
           });
+
+          const productId = productUrl.match(/-p-(\d+)$/)[1];
 
           const product = {
             title,
@@ -340,6 +344,7 @@ const scrapeProductsFromUrl = async (page, url) => {
             description,
             specifications: specs2,
             categories,
+            productId,
           };
 
           console.log(`Processing product: ${product.title}`);
