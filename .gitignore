@@ -1,2 +1,5 @@
 /node_modules
 products.json
+/output
+test.js
+index.html

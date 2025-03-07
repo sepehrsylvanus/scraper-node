@@ -177,7 +177,7 @@ const scrapeProductsFromUrl = async (page, url) => {
           .text()
           .trim()
           .match(/[^\d\s]+/)[0];
-        const productUrl =
+        const url =
           "https://www.boyner.com.tr/" +
           $(element).find(".product-item_image__IxD4T a").attr("href");
 
@@ -198,24 +198,41 @@ const scrapeProductsFromUrl = async (page, url) => {
 
           const otherImages = await productPage.evaluate(() => {
             window.scrollBy(0, window.innerHeight);
-            const images = Array.from(
-              document.querySelectorAll(
-                '.product-image-layout_otherImages__KwpFh .product-image-layout_imageSmall__gQdZ_ img[data-nimg="intrinsic"]'
-              )
+            const spans = document.querySelectorAll(
+              "div.grid_productDetail__HCmCI div.grid_productDetailGallery__AvuaZ div.product-image-layout_otherImages__KwpFh div span "
             );
 
+            const imageSrcs = Array.from(spans).map((span) => {
+              const img = span.querySelector('img[data-nimg="intrinsic"]');
+              if (img && !img.src.startsWith("data:image")) {
+                return img.getAttribute("src");
+              }
+
+              const noscript = span.querySelector("noscript");
+              if (noscript) {
+                const tempDiv = document.createElement("div");
+                tempDiv.innerHTML = noscript.innerHTML;
+                const noscriptImg = tempDiv.querySelector("img");
+                if (noscriptImg) {
+                  return noscriptImg.getAttribute("src");
+                }
+              }
+
+              return null;
+            });
+            return imageSrcs.filter((src) => src !== null);
             // Extract src directly from images with data-nimg="intrinsic"
-            const imgUrls = images
-              .map((img) => {
-                // Prioritize actual image source over placeholder
-                const src = img.getAttribute("src");
-                return src && !src.startsWith("data:") ? src : null;
-              })
-              .filter((src) => src); // Remove null values
+            // const imgUrls = images
+            //   .map((img) => {
+            //     // Prioritize actual image source over placeholder
+            //     const src = img.getAttribute("src");
+            //     return src && !src.startsWith("data:") ? src : null;
+            //   })
+            //   .filter((src) => src); // Remove null values
 
-            return imgUrls.join(";") || ""; // Return empty string if no images
+            // return imgUrls.join(";") || ""; // Return empty string if no images
           });
-
+          console.log({ otherImages });
           const rating = await productPage.evaluate(async () => {
             const ratingModal = document.querySelector(
               ".rating-custom_reviewText__EUE7E"
@@ -326,8 +343,7 @@ const scrapeProductsFromUrl = async (page, url) => {
             const categoriesText = categories.map((category) =>
               category.textContent.trim()
             );
-            const lastIndex = fullString.lastIndexOf(">");
-            return categoriesText.substring(0, lastIndex);
+            return categoriesText.slice(0, -1).join(">");
           });
 
           const productId = productUrl.match(/-p-(\d+)$/)[1];
@@ -337,7 +353,7 @@ const scrapeProductsFromUrl = async (page, url) => {
             brand,
             price,
             currency,
-            productUrl,
+            url,
             images: image1 + ";" + otherImages,
             rating,
             shipping_fee,
