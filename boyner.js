@@ -94,7 +94,7 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
   }
 
   let stuckTime = 0;
-  const stuckThreshold = 120000; // 2 minutes
+  const stuckThreshold = 20000; // 20 seconds
   let lastScrollPosition = 0;
   let scrollStuckTime = 0;
   const scrollStuckThreshold = 30000; // 30 seconds
@@ -114,17 +114,17 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       console.log(`[DEBUG] Current scroll position: ${currentScrollPosition}`);
     } catch (error) {
       console.error("[ERROR] Failed to get scroll position:", error.message);
-      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.evaluate(() => window.scrollTo(0, 0)); // Reset to top
       continue;
     }
 
     if (currentScrollPosition === lastScrollPosition) {
-      scrollStuckTime += 2000; // Adjusted to match delay
+      scrollStuckTime += 2000;
       if (scrollStuckTime >= scrollStuckThreshold) {
         console.error(
           `[ERROR] Scroller stuck at position ${currentScrollPosition} for 30 seconds! Resetting...`
         );
-        await page.evaluate(() => window.scrollTo(0, -window.innerHeight));
+        await page.evaluate(() => window.scrollTo(0, 0));
         resetCount++;
         console.log(`[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`);
         scrollStuckTime = 0;
@@ -137,11 +137,11 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
     }
 
     try {
-      await page.evaluate(() => window.scrollBy(0, 500)); // Larger scroll
+      await page.evaluate(() => window.scrollBy(0, 500));
       console.log("[DEBUG] Scrolled by 500px");
     } catch (error) {
       console.error("[ERROR] Scroll execution failed:", error.message);
-      await page.evaluate(() => window.scrollTo(0, -window.innerHeight));
+      await page.evaluate(() => window.scrollTo(0, 0));
       continue;
     }
 
@@ -156,7 +156,7 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       );
     } catch (error) {
       console.error("[ERROR] Failed to get product count:", error.message);
-      await page.evaluate(() => window.scrollTo(0, -window.innerHeight));
+      await page.evaluate(() => window.scrollTo(0, 0));
       continue;
     }
 
@@ -167,26 +167,42 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       lastProductCount = currentProductCount;
       stuckTime = 0;
     } else {
-      stuckTime += 2000; // Adjusted to match delay
-      if (stuckTime % 10000 === 0) {
+      stuckTime += 2000;
+      if (stuckTime >= stuckThreshold) {
         console.log(
-          `[INFO] No progress, stuck for ${stuckTime / 1000} seconds...`
+          `[INFO] No new products loaded for 20 seconds. Starting reset countdown...`
+        );
+        let countdown = 20; // Countdown from 20 seconds
+        while (countdown > 0 && !shouldStop) {
+          process.stdout.write(
+            `\r[INFO] Resetting in ${countdown} seconds... (Press 'q' to quit)`
+          );
+          await delay(1000); // Wait 1 second per countdown step
+          countdown--;
+        }
+        if (!shouldStop) {
+          console.log(
+            `\n[INFO] Resetting scroll... (${lastProductCount}/${totalProducts})`
+          );
+          await page.evaluate(() => window.scrollTo(0, 0));
+          resetCount++;
+          console.log(
+            `[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`
+          );
+          stuckTime = 0;
+          lastProductCount = await evaluateWithRetry(
+            page,
+            () => document.querySelectorAll(".listProductItem").length
+          );
+        }
+      } else {
+        const remainingTime = (stuckThreshold - stuckTime) / 1000;
+        process.stdout.write(
+          `\r[INFO] No progress, stuck for ${
+            stuckTime / 1000
+          }s (Reset in ${remainingTime}s)`
         );
       }
-    }
-
-    if (stuckTime >= stuckThreshold) {
-      console.log(
-        `[INFO] Stuck for 2 minutes, resetting... (${lastProductCount}/${totalProducts})`
-      );
-      await page.evaluate(() => window.scrollTo(0, -window.innerHeight));
-      resetCount++;
-      console.log(`[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`);
-      lastProductCount = await evaluateWithRetry(
-        page,
-        () => document.querySelectorAll(".listProductItem").length
-      );
-      stuckTime = 0;
     }
 
     if (resetCount >= MAX_RESETS) {
@@ -201,7 +217,7 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       break;
     }
 
-    await delay(2000); // Slower delay for loading
+    await delay(2000);
   }
 
   return lastProductCount >= totalProducts;
@@ -335,7 +351,6 @@ const scrapeProductsFromUrl = async (url) => {
               })
               .filter((src) => src);
           });
-
           const rating = await evaluateWithRetry(productPage, async () => {
             const ratingModal = document.querySelector(
               ".rating-custom_reviewText__EUE7E"
