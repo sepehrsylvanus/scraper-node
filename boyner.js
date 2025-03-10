@@ -93,11 +93,9 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
     lastProductCount = 0;
   }
 
+  let lastScrollPosition = 0;
   let stuckTime = 0;
   const stuckThreshold = 20000; // 20 seconds
-  let lastScrollPosition = 0;
-  let scrollStuckTime = 0;
-  const scrollStuckThreshold = 30000; // 30 seconds
 
   while (
     lastProductCount < totalProducts &&
@@ -118,24 +116,7 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       continue;
     }
 
-    if (currentScrollPosition === lastScrollPosition) {
-      scrollStuckTime += 2000;
-      if (scrollStuckTime >= scrollStuckThreshold) {
-        console.error(
-          `[ERROR] Scroller stuck at position ${currentScrollPosition} for 30 seconds! Resetting...`
-        );
-        await page.evaluate(() => window.scrollTo(0, 0));
-        resetCount++;
-        console.log(`[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`);
-        scrollStuckTime = 0;
-        lastScrollPosition = 0;
-        continue;
-      }
-    } else {
-      scrollStuckTime = 0;
-      lastScrollPosition = currentScrollPosition;
-    }
-
+    // Scroll down by 500px
     try {
       await page.evaluate(() => window.scrollBy(0, 500));
       console.log("[DEBUG] Scrolled by 500px");
@@ -165,49 +146,60 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
         `[INFO] New products loaded: ${currentProductCount}/${totalProducts}`
       );
       lastProductCount = currentProductCount;
-      stuckTime = 0;
+      stuckTime = 0; // Reset stuck time when new products load
+      lastScrollPosition = currentScrollPosition;
+    } else if (currentScrollPosition === lastScrollPosition) {
+      stuckTime += 2000; // Increment stuck time if scroll position hasn’t changed
+      console.log(
+        `[INFO] Scroll stuck for ${
+          stuckTime / 1000
+        }s at position ${currentScrollPosition}`
+      );
     } else {
-      stuckTime += 2000;
-      if (stuckTime >= stuckThreshold) {
-        console.log(
-          `[INFO] No new products for 20 seconds. Resetting to top and restarting scroll...`
-        );
-        await page.evaluate(() => window.scrollTo(0, 0));
-        resetCount++;
-        console.log(`[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`);
-        stuckTime = 0;
-        lastScrollPosition = 0;
+      stuckTime = 0; // Reset stuck time if scroll position changes
+      lastScrollPosition = currentScrollPosition;
+    }
 
-        // Restart scrolling from the top
-        let scrollPosition = 0;
-        while (
-          scrollPosition <
-            (await page.evaluate(() => document.body.scrollHeight)) &&
-          lastProductCount < totalProducts &&
-          !shouldStop
-        ) {
-          try {
-            await page.evaluate(
-              (pos) => window.scrollTo(0, pos),
-              scrollPosition
+    // Check if scroll has been stuck for 20 seconds
+    if (stuckTime >= stuckThreshold) {
+      console.log(
+        `[INFO] Scroll stuck for 20 seconds at position ${currentScrollPosition}. Resetting to top and restarting...`
+      );
+      await page.evaluate(() => window.scrollTo(0, 0));
+      resetCount++;
+      console.log(`[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`);
+      stuckTime = 0;
+      lastScrollPosition = 0;
+
+      // Restart scrolling from the top
+      let scrollPosition = 0;
+      while (
+        scrollPosition <
+          (await page.evaluate(() => document.body.scrollHeight)) &&
+        lastProductCount < totalProducts &&
+        !shouldStop &&
+        resetCount < MAX_RESETS
+      ) {
+        try {
+          await page.evaluate((pos) => window.scrollTo(0, pos), scrollPosition);
+          console.log(
+            `[DEBUG] Restarted scroll to position: ${scrollPosition}`
+          );
+          await delay(2000); // Wait for content to load
+          currentProductCount = await evaluateWithRetry(
+            page,
+            () => document.querySelectorAll(".listProductItem").length
+          );
+          if (currentProductCount > lastProductCount) {
+            console.log(
+              `[INFO] New products loaded after reset: ${currentProductCount}/${totalProducts}`
             );
-            console.log(`[DEBUG] Scrolled to position: ${scrollPosition}`);
-            await delay(2000); // Wait for content to load
-            currentProductCount = await evaluateWithRetry(
-              page,
-              () => document.querySelectorAll(".listProductItem").length
-            );
-            if (currentProductCount > lastProductCount) {
-              console.log(
-                `[INFO] New products loaded after reset: ${currentProductCount}/${totalProducts}`
-              );
-              lastProductCount = currentProductCount;
-            }
-            scrollPosition += 500;
-          } catch (error) {
-            console.error("[ERROR] Failed during reset scroll:", error.message);
-            break;
+            lastProductCount = currentProductCount;
           }
+          scrollPosition += 500;
+        } catch (error) {
+          console.error("[ERROR] Failed during reset scroll:", error.message);
+          break;
         }
       }
     }
@@ -224,7 +216,7 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       break;
     }
 
-    await delay(2000);
+    await delay(2000); // Wait between scroll attempts
   }
 
   return lastProductCount >= totalProducts;
@@ -299,7 +291,7 @@ const scrapeProductsFromUrl = async (url) => {
       for (const element of elements) {
         if (shouldStop) break;
         const productUrl =
-          "https://www.boyner.com.tr/" +
+          "https://www.boyner.com.tr" +
           $(element).find(".product-item_image__IxD4T a").attr("href");
 
         if (scrapedProductUrls.has(productUrl)) {
