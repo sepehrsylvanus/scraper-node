@@ -72,8 +72,8 @@ const evaluateWithRetry = async (page, fn, retries = 3, delayMs = 2000) => {
   throw new Error("Max retries reached for evaluation");
 };
 
-const scrollToLoadAllProducts = async (page, totalProducts) => {
-  console.log("[DEBUG] Entering scrollToLoadAllProducts...");
+const advancedInfiniteScroll = async (page, totalProducts) => {
+  console.log("[DEBUG] Entering advancedInfiniteScroll...");
   let lastProductCount = 0;
 
   try {
@@ -92,24 +92,55 @@ const scrollToLoadAllProducts = async (page, totalProducts) => {
     lastProductCount = 0;
   }
 
-  while (lastProductCount < totalProducts && !shouldStop) {
-    const previousHeight = await page.evaluate(() => document.body.scrollHeight);
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await delay(3000); // Wait for new content to load
+  let lastScrollPosition = 0;
+  let stuckTime = 0;
+  const stuckThreshold = 20000; // 20 seconds
+  let resetCount = 0;
+  const MAX_RESETS = 5;
 
-    const newHeight = await page.evaluate(() => document.body.scrollHeight);
+  while (
+    lastProductCount < totalProducts &&
+    !shouldStop &&
+    resetCount < MAX_RESETS
+  ) {
+    console.log("[DEBUG] Starting scroll iteration...");
+    let currentScrollPosition = 0;
+    try {
+      currentScrollPosition = await evaluateWithRetry(
+        page,
+        () => window.scrollY
+      );
+      console.log(`[DEBUG] Current scroll position: ${currentScrollPosition}`);
+    } catch (error) {
+      console.error("[ERROR] Failed to get scroll position:", error.message);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      continue;
+    }
+
+    // Scroll down by 500px
+    try {
+      await page.evaluate(() => window.scrollBy(0, 500));
+      console.log("[DEBUG] Scrolled by 500px");
+    } catch (error) {
+      console.error("[ERROR] Scroll execution failed:", error.message);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      continue;
+    }
+
+    await delay(2000); // Wait 2 seconds for content to load
+
     let currentProductCount = 0;
-
     try {
       currentProductCount = await evaluateWithRetry(
         page,
         () => document.querySelectorAll(".listProductItem").length
       );
       console.log(
-        `[INFO] Current product count: ${currentProductCount}/${totalProducts}`
+        `[DEBUG] Product count: ${currentProductCount}/${totalProducts}`
       );
     } catch (error) {
       console.error("[ERROR] Failed to get product count:", error.message);
+      await page.evaluate(() => window.scrollTo(0, 0));
       continue;
     }
 
@@ -118,18 +149,29 @@ const scrollToLoadAllProducts = async (page, totalProducts) => {
         `[INFO] New products loaded: ${currentProductCount}/${totalProducts}`
       );
       lastProductCount = currentProductCount;
-    } else if (newHeight === previousHeight) {
+      stuckTime = 0; // Reset stuck time when new products load
+      lastScrollPosition = currentScrollPosition;
+    } else if (currentScrollPosition === lastScrollPosition) {
+      stuckTime += 2000;
       console.log(
-        "[INFO] No new content loaded (reached end or limit), checking pagination..."
+        `[INFO] Scroll stuck for ${
+          stuckTime / 1000
+        }s at position ${currentScrollPosition}`
       );
-      const hasPagination = await page.evaluate(() =>
-        !!document.querySelector(".pagination")
+    } else {
+      stuckTime = 0;
+      lastScrollPosition = currentScrollPosition;
+    }
+
+    if (stuckTime >= stuckThreshold) {
+      console.log(
+        `[INFO] Scroll stuck for 20 seconds at position ${currentScrollPosition}. Resetting to top...`
       );
-      if (hasPagination) {
-        console.log("[INFO] Pagination detected, switching to pagination mode...");
-        return await handlePagination(page, totalProducts);
-      }
-      break; // No new products and no pagination, assume we've loaded all
+      await page.evaluate(() => window.scrollTo(0, 0));
+      resetCount++;
+      console.log(`[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`);
+      stuckTime = 0;
+      lastScrollPosition = 0;
     }
 
     if (currentProductCount >= totalProducts) {
@@ -138,54 +180,13 @@ const scrollToLoadAllProducts = async (page, totalProducts) => {
       );
       break;
     }
+  }
 
-    await delay(2000); // Additional wait between scrolls
+  if (resetCount >= MAX_RESETS) {
+    console.log("[WARN] Max resets reached, possibly not all products loaded.");
   }
 
   return lastProductCount >= totalProducts;
-};
-
-const handlePagination = async (page, totalProducts) => {
-  let allProductsLoaded = 0;
-  let pageNumber = 1;
-
-  while (allProductsLoaded < totalProducts && !shouldStop) {
-    console.log(`[INFO] Processing page ${pageNumber}...`);
-
-    try {
-      const currentProductCount = await evaluateWithRetry(
-        page,
-        () => document.querySelectorAll(".listProductItem").length
-      );
-      console.log(
-        `[INFO] Products on page ${pageNumber}: ${currentProductCount}/${totalProducts}`
-      );
-      allProductsLoaded = currentProductCount; // Note: This assumes each page replaces the previous content
-    } catch (error) {
-      console.error("[ERROR] Failed to count products:", error.message);
-      break;
-    }
-
-    const nextPageButton = await page.$(".pagination .next");
-    if (!nextPageButton) {
-      console.log("[INFO] No more pages to process.");
-      break;
-    }
-
-    try {
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: "networkidle0", timeout: 120000 }),
-        nextPageButton.click(),
-      ]);
-      pageNumber++;
-      await delay(3000);
-    } catch (error) {
-      console.error("[ERROR] Failed to navigate to next page:", error.message);
-      break;
-    }
-  }
-
-  return allProductsLoaded >= totalProducts;
 };
 
 const scrapeProductsFromUrl = async (url) => {
@@ -217,7 +218,7 @@ const scrapeProductsFromUrl = async (url) => {
       return [];
     }
 
-    await scrollToLoadAllProducts(page, totalProducts);
+    await advancedInfiniteScroll(page, totalProducts);
     console.log("[INFO] Scroll complete, waiting 5 seconds...");
     await delay(5000);
 
@@ -230,7 +231,7 @@ const scrapeProductsFromUrl = async (url) => {
       .toLowerCase();
     const outputFilePath = path.join(outputDir, `${sanitizedFilename}_products.json`);
 
-    // Extract all product URLs from the loaded page
+    // Extract all product URLs after scrolling
     const productUrls = await page.evaluate(() => {
       return Array.from(document.querySelectorAll(".listProductItem")).map(
         (element) =>
@@ -256,11 +257,11 @@ const scrapeProductsFromUrl = async (url) => {
         const $$ = cheerio.load(productContent);
 
         const title = $$(".product-item_name__HVuFo").text().trim() || 
-                      $$(".product-detail_name__3sAhd").text().trim(); // Fallback for product page
+                      $$(".product-detail_name__3sAhd").text().trim();
         const brand = $$(".product-item_brand__LFImW").text().trim() || 
-                      $$(".product-detail_brand__2b9R6").text().trim(); // Fallback
+                      $$(".product-detail_brand__2b9R6").text().trim();
         const priceText = $$(".product-price_checkPrice__NMY9e strong").text().trim() || 
-                         $$(".product-price_price__6jV0N").text().trim(); // Fallback
+                         $$(".product-price_price__6jV0N").text().trim();
         const price = parseFloat(priceText.match(/(\d+(\.\d+)?)/)?.[0] || "0");
         const currency = priceText.match(/[^\d\s]+/)?.[0] || "";
         const image1 = $$(
