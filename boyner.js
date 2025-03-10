@@ -114,7 +114,7 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       console.log(`[DEBUG] Current scroll position: ${currentScrollPosition}`);
     } catch (error) {
       console.error("[ERROR] Failed to get scroll position:", error.message);
-      await page.evaluate(() => window.scrollTo(0, 0)); // Reset to top
+      await page.evaluate(() => window.scrollTo(0, 0));
       continue;
     }
 
@@ -170,38 +170,45 @@ const advancedInfiniteScroll = async (page, totalProducts) => {
       stuckTime += 2000;
       if (stuckTime >= stuckThreshold) {
         console.log(
-          `[INFO] No new products loaded for 20 seconds. Starting reset countdown...`
+          `[INFO] No new products for 20 seconds. Resetting to top and restarting scroll...`
         );
-        let countdown = 20; // Countdown from 20 seconds
-        while (countdown > 0 && !shouldStop) {
-          process.stdout.write(
-            `\r[INFO] Resetting in ${countdown} seconds... (Press 'q' to quit)`
-          );
-          await delay(1000); // Wait 1 second per countdown step
-          countdown--;
+        await page.evaluate(() => window.scrollTo(0, 0));
+        resetCount++;
+        console.log(`[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`);
+        stuckTime = 0;
+        lastScrollPosition = 0;
+
+        // Restart scrolling from the top
+        let scrollPosition = 0;
+        while (
+          scrollPosition <
+            (await page.evaluate(() => document.body.scrollHeight)) &&
+          lastProductCount < totalProducts &&
+          !shouldStop
+        ) {
+          try {
+            await page.evaluate(
+              (pos) => window.scrollTo(0, pos),
+              scrollPosition
+            );
+            console.log(`[DEBUG] Scrolled to position: ${scrollPosition}`);
+            await delay(2000); // Wait for content to load
+            currentProductCount = await evaluateWithRetry(
+              page,
+              () => document.querySelectorAll(".listProductItem").length
+            );
+            if (currentProductCount > lastProductCount) {
+              console.log(
+                `[INFO] New products loaded after reset: ${currentProductCount}/${totalProducts}`
+              );
+              lastProductCount = currentProductCount;
+            }
+            scrollPosition += 500;
+          } catch (error) {
+            console.error("[ERROR] Failed during reset scroll:", error.message);
+            break;
+          }
         }
-        if (!shouldStop) {
-          console.log(
-            `\n[INFO] Resetting scroll... (${lastProductCount}/${totalProducts})`
-          );
-          await page.evaluate(() => window.scrollTo(0, 0));
-          resetCount++;
-          console.log(
-            `[INFO] Reset to top (Reset ${resetCount}/${MAX_RESETS})`
-          );
-          stuckTime = 0;
-          lastProductCount = await evaluateWithRetry(
-            page,
-            () => document.querySelectorAll(".listProductItem").length
-          );
-        }
-      } else {
-        const remainingTime = (stuckThreshold - stuckTime) / 1000;
-        process.stdout.write(
-          `\r[INFO] No progress, stuck for ${
-            stuckTime / 1000
-          }s (Reset in ${remainingTime}s)`
-        );
       }
     }
 
@@ -337,10 +344,17 @@ const scrapeProductsFromUrl = async (url) => {
             '.product-image-layout_imageBig__8TB1z.product-image-layout_lbEnabled__IfV9T span img[data-nimg="intrinsic"]'
           ).attr("src");
 
+          console.log(`[DEBUG] Main image: ${image1}`);
+
+          // Scroll to ensure all images are loaded
+          await productPage.evaluate(() =>
+            window.scrollBy(0, window.innerHeight * 2)
+          );
+          await delay(3000); // Wait for images to load
+
           const otherImages = await evaluateWithRetry(productPage, () => {
-            window.scrollBy(0, window.innerHeight);
             const spans = document.querySelectorAll(
-              "div.grid_productDetail__HCmCI div.grid_productDetailGallery__AvuaZ div.product-image-layout_otherImages__KwpFh div span"
+              ".product-image-layout_otherImages__KwpFh span"
             );
             return Array.from(spans)
               .map((span) => {
@@ -349,8 +363,17 @@ const scrapeProductsFromUrl = async (url) => {
                   ? img.src
                   : null;
               })
-              .filter((src) => src);
+              .filter(
+                (src) =>
+                  src &&
+                  src !==
+                    document.querySelector(
+                      '.product-image-layout_imageBig__8TB1z img[data-nimg="intrinsic"]'
+                    )?.src
+              ); // Exclude main image and null
           });
+          console.log(`[DEBUG] Other images: ${JSON.stringify(otherImages)}`);
+
           const rating = await evaluateWithRetry(productPage, async () => {
             const ratingModal = document.querySelector(
               ".rating-custom_reviewText__EUE7E"
@@ -451,7 +474,7 @@ const scrapeProductsFromUrl = async (url) => {
             price,
             currency,
             url: productUrl,
-            images: [image1, ...otherImages].join(";"),
+            images: [image1, ...otherImages].filter(Boolean).join(";"), // Combine and filter out falsy values
             rating,
             shipping_fee,
             description,
