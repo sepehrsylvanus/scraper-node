@@ -3,7 +3,6 @@ const fs = require("fs");
 const path = require("path");
 
 const outputDir = path.join(__dirname, "output");
-// Ensure output directory exists
 if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir);
 }
@@ -11,7 +10,12 @@ if (!fs.existsSync(outputDir)) {
 let browser;
 let shouldStop = false;
 
-// Helper functions
+const today = new Date("2025-03-10");
+const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
+  2,
+  "0"
+)}-${String(today.getDate()).padStart(2, "0")}`; // "2025-03-10"
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const launchBrowser = async () => {
@@ -30,10 +34,9 @@ const launchBrowser = async () => {
 
 const scrollUntilVisible = async (page, selector) => {
   try {
-    // Scroll the page until the selector is visible
     let isVisible = false;
     let scrollAttempts = 0;
-    const maxScrollAttempts = 20; // Prevent infinite scrolling
+    const maxScrollAttempts = 20;
 
     while (!isVisible && scrollAttempts < maxScrollAttempts) {
       const element = await page.$(selector);
@@ -53,9 +56,9 @@ const scrollUntilVisible = async (page, selector) => {
         isVisible = true;
       } else {
         await page.evaluate(() => {
-          window.scrollBy(0, window.innerHeight / 2); // Scroll down half a screen height
+          window.scrollBy(0, window.innerHeight / 2);
         });
-        await delay(500); // Wait before checking again
+        await delay(500);
         scrollAttempts++;
       }
     }
@@ -71,16 +74,12 @@ const scrollUntilVisible = async (page, selector) => {
 
 const extractProductUrls = async (page) => {
   try {
-    // Get all product URLs from the current page based on the provided HTML structure
     const productUrls = await page.evaluate(() => {
-      // Target app-custom-product-grid-item elements
       const productElements = Array.from(
         document.querySelectorAll("app-custom-product-grid-item")
       );
-
       return productElements
         .map((element) => {
-          // Find the product link in the infos section
           const productLink = element.querySelector(".infos .cx-product-name");
           if (productLink && productLink.getAttribute("href")) {
             return "https://www.gratis.com" + productLink.getAttribute("href");
@@ -89,7 +88,6 @@ const extractProductUrls = async (page) => {
         })
         .filter((url) => url !== null);
     });
-
     console.log(`Found ${productUrls.length} product URLs on current page`);
     return productUrls;
   } catch (error) {
@@ -100,48 +98,137 @@ const extractProductUrls = async (page) => {
 
 const scrapeProductDetails = async (page, url) => {
   try {
-    // Navigate to the product page
     console.log(`Navigating to product: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2" });
     await delay(2000);
 
-    // Extract product details
-    const productDetails = await page.evaluate(() => {
-      // Use document querySelector for proper element selection
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+    await delay(2000);
+
+    const productIdMatch = url.match(/-p-(\d+)$/);
+    const productId = productIdMatch ? productIdMatch[1] : null;
+
+    const details = await page.evaluate(() => {
       const brand =
-        document.querySelector(".manufacturer")?.textContent.trim() || "";
+        document.querySelector(".manufacturer")?.textContent.trim() || null;
 
       const titleElement = document.querySelector(".product-title");
-      let title = "";
+      let title = null;
       if (titleElement) {
-        // Split by space and remove the first word (typically the brand name)
         const titleParts = titleElement.textContent.trim().split(" ");
-        title = titleParts.slice(1).join(" ");
+        title = titleParts.slice(1).join(" ") || null;
       }
 
       const priceWhole =
-        document.querySelector(".price .discounted")?.textContent.trim() || "";
+        document.querySelector(".price .discounted")?.textContent.trim() ||
+        null;
       const priceFraction =
-        document.querySelector(".price .sm")?.textContent.trim() || "";
-      const completePrice = `${priceWhole}${priceFraction}`;
+        document.querySelector(".price .sm")?.textContent.trim() || null;
+      const completePrice =
+        priceWhole && priceFraction ? `${priceWhole}${priceFraction}` : null;
+      const currency =
+        document.querySelector(".price .thin")?.textContent.trim() || null;
+
+      const swiperImages = Array.from(
+        document.querySelectorAll(".swiper-slide img")
+      )
+        .map((img) => img.getAttribute("src"))
+        .filter((src) => src && !src.includes("gratis-placeholder.svg"));
+      const images = swiperImages.length > 0 ? swiperImages.join(";") : null;
+
+      const ratingElement = document.querySelector(
+        ".JetR-inline-ratingOrCount"
+      );
+      const ratingText = ratingElement?.textContent.trim() || null;
+      const rating = ratingText
+        ? parseFloat(ratingText.replace(/[()]/g, ""))
+        : null;
+
+      // Use innerHTML for description
+      const descriptionElement = document.querySelector(
+        ".pdp-detail-tab-content"
+      );
+      let description = null;
+      if (descriptionElement) {
+        const fullHTML = descriptionElement.innerHTML.trim();
+        const titleMatch = fullHTML.match(/^<b>.*?<\/b>/i); // Match <b> tag and its content
+        if (titleMatch) {
+          description = fullHTML
+            .replace(titleMatch[0], "") // Remove the <b> title
+            .replace(/^(\s*<br\s*\/?>\s*)+/, "") // Remove leading <br> tags
+            .trim();
+        } else {
+          description = fullHTML;
+        }
+      }
+
+      const specsTable = document.querySelector(".specs-table");
+      let specifications = null;
+      if (specsTable) {
+        specifications = Array.from(specsTable.querySelectorAll("tbody tr"))
+          .map((row) => {
+            const cells = row.querySelectorAll("td");
+            if (cells.length === 2) {
+              return {
+                name: cells[0].textContent.trim(),
+                value: cells[1].textContent.trim(),
+              };
+            }
+            return null;
+          })
+          .filter((spec) => spec !== null);
+      }
+
+      const breadcrumbItems = document.querySelectorAll(
+        ".breadcrumb .breadcrumb-item a"
+      );
+      let categories = null;
+      if (breadcrumbItems.length > 1) {
+        const categoryNames = Array.from(breadcrumbItems)
+          .slice(0, -1)
+          .map((item) => item.textContent.trim());
+        categories = categoryNames.join(">");
+      }
 
       return {
         brand,
         title,
-        completePrice,
+        price: completePrice,
+        currency,
         url: window.location.href,
+        images,
+        rating,
+        description,
+        specifications,
+        categories,
       };
     });
 
-    console.log(`Scraped product: ${productDetails.title}`);
+    const productDetails = {
+      ...details,
+      productId,
+    };
+
+    console.log(
+      `Scraped product: ${productDetails.title} with productId: ${productDetails.productId}`
+    );
     return productDetails;
   } catch (error) {
     console.error(`Error scraping product at ${url}:`, error);
+    const productIdMatch = url.match(/-p-(\d+)$/);
+    const productId = productIdMatch ? productIdMatch[1] : null;
     return {
-      brand: "",
-      title: "",
-      completePrice: "",
+      brand: null,
+      title: null,
+      price: null,
+      currency: null,
       url,
+      images: null,
+      rating: null,
+      description: null,
+      specifications: null,
+      categories: null,
+      productId,
       error: error.message,
     };
   }
@@ -149,20 +236,17 @@ const scrapeProductDetails = async (page, url) => {
 
 const scrapePagination = async (page, baseUrl) => {
   let currentPage = 1;
-  // Extract the base URL without page parameter for file naming
   const urlParts = baseUrl.split("?");
   const baseUrlWithoutPage = urlParts[0];
   const outputFileName = path.join(
     outputDir,
     `${baseUrlWithoutPage
       .replace(/https?:\/\/|www\.|\.com\//g, "")
-      .replace(/\//g, "_")}.json`
+      .replace(/\//g, "_")}_${dateStr}.json`
   );
 
-  // Initialize the products array
   let allProducts = [];
 
-  // Load existing data if the file exists
   if (fs.existsSync(outputFileName)) {
     try {
       const existingData = fs.readFileSync(outputFileName, "utf8");
@@ -178,27 +262,29 @@ const scrapePagination = async (page, baseUrl) => {
     }
   }
 
-  // Start by going to the base URL
   console.log(`Starting with URL: ${baseUrl}`);
   await page.goto(baseUrl, { waitUntil: "networkidle2" });
-  await delay(3000); // Give time for the page to load
+  await delay(3000);
 
-  // Pagination logic
+  const totalProducts = await page.evaluate(() => {
+    const infoElement = document.querySelector(".sorting-header .info");
+    if (infoElement) {
+      const text = infoElement.textContent.trim();
+      const match = text.match(/(\d+)/);
+      return match ? parseInt(match[1], 10) : 0;
+    }
+    return 0;
+  });
+  console.log(`Total products to scrape: ${totalProducts}`);
+
   while (!shouldStop) {
     console.log(`Scraping page ${currentPage}...`);
-
-    // Get all product URLs on the current page
     const productUrls = await extractProductUrls(page);
 
     if (productUrls.length === 0) {
-      console.log(
-        "No products found on this page. Moving to next page or ending if no pagination."
-      );
+      console.log("No products found on this page.");
     } else {
-      // Create a new page for product details
       const productPage = await browser.newPage();
-
-      // Process each product URL
       for (const productUrl of productUrls) {
         const productDetails = await scrapeProductDetails(
           productPage,
@@ -206,101 +292,90 @@ const scrapePagination = async (page, baseUrl) => {
         );
         if (productDetails) {
           allProducts.push(productDetails);
-
-          // Save after each product to prevent data loss if something fails
           fs.writeFileSync(
             outputFileName,
             JSON.stringify(allProducts, null, 2)
           );
+          console.log(
+            `Progress: ${allProducts.length}/${totalProducts} products scraped`
+          );
         }
       }
-
-      // Close the product page
       await productPage.close();
     }
 
-    // Scroll until the "Next" button is visible
-    const isNextButtonVisible = await scrollUntilVisible(
-      page,
-      ".pagination li:last-child a"
-    );
-
-    if (!isNextButtonVisible) {
+    if (allProducts.length >= totalProducts) {
       console.log(
-        "Pagination not found or next button not visible, ending scraping."
+        `Reached total product count (${totalProducts}). Ending scraping.`
       );
       break;
     }
 
-    // Wait before clicking
-    await delay(1000);
-
-    // Check if this is the last page by seeing if the next button is disabled
-    const isLastPage = await page.evaluate(() => {
-      const nextButton = document.querySelector(".pagination li:last-child");
-      return nextButton ? nextButton.classList.contains("disabled") : true;
-    });
-
-    if (isLastPage) {
-      console.log("Reached the last page, ending scraping.");
+    const nextButton = await page.$(".pagination .type-next:not(.disabled)");
+    if (!nextButton) {
+      console.log("No next button found or it’s disabled. Ending scraping.");
       break;
     }
 
-    // Click the next page button and wait for navigation
-    console.log(`Navigating to next page`);
+    await scrollUntilVisible(page, ".pagination .type-next");
+    console.log(`Navigating to page ${currentPage + 1}`);
     try {
       await Promise.all([
-        page.click(".pagination li:last-child a"),
+        page.click(".pagination .type-next"),
         page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }),
       ]);
     } catch (error) {
       console.error(`Error navigating to next page: ${error.message}`);
-      console.log("Attempting to continue scraping...");
+      break;
     }
 
-    await delay(3000); // Wait for page load
+    await delay(3000);
     currentPage++;
   }
 
   console.log(
-    `Pagination scraping finished. Scraped ${allProducts.length} products total.`
+    `Pagination scraping finished for ${baseUrl}. Scraped ${allProducts.length} out of ${totalProducts} products.`
   );
   console.log(`Results saved to ${outputFileName}`);
 };
 
 const scrapeMultipleUrls = async () => {
-  try {
-    // Example URL for pagination testing - update this with your target URL
-    const baseUrl =
-      "https://www.gratis.com/makyaj/dudak-parlaticisi-c-5010105?page=1";
+  const urls = process.argv.slice(2);
 
-    // Launch browser once
+  if (urls.length === 0) {
+    console.error(
+      "No URLs provided. Usage: node gratis.js <url1> <url2> <url3> ..."
+    );
+    process.exit(1);
+  }
+
+  try {
     browser = await launchBrowser();
 
-    // Process pagination for the URL
-    const page = await browser.newPage();
+    for (const baseUrl of urls) {
+      console.log(`Starting scraping for: ${baseUrl}`);
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1366, height: 768 });
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+      );
 
-    // Set a reasonable viewport size
-    await page.setViewport({ width: 1366, height: 768 });
+      await scrapePagination(page, baseUrl);
+      await page.close();
+      console.log(`Finished scraping for: ${baseUrl}\n`);
+      shouldStop = false;
+    }
 
-    // Optional: Set user agent to mimic a real browser
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    );
-
-    await scrapePagination(page, baseUrl);
-
-    // Close browser
     await browser.close();
+    console.log("All URLs processed successfully.");
     process.exit(0);
   } catch (error) {
-    console.error("Error during pagination scraping:", error);
+    console.error("Error during scraping:", error);
     if (browser) await browser.close();
     process.exit(1);
   }
 };
 
-// Handle graceful shutdown
 process.on("SIGINT", async () => {
   console.log("Received SIGINT. Shutting down gracefully...");
   shouldStop = true;
