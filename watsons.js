@@ -102,43 +102,27 @@ const scrapeProductDetails = async (page, url) => {
     await page.goto(url, { waitUntil: "networkidle2" });
     await delay(2000);
 
-    const details = await page.evaluate(() => {
+    const details = await page.evaluate((productUrl) => {
       const priceElement = document.querySelector(
         ".formatted-price.formatted-price--currency-last"
       );
       let price = null;
       let currency = null;
       if (priceElement) {
-        currency =
-          priceElement
-            .querySelector(".formatted-price__currency")
-            ?.textContent.trim() || null;
-        const decimal =
-          priceElement
-            .querySelector(".formatted-price__decimal")
-            ?.textContent.trim() || "";
-        const separator =
-          priceElement
-            .querySelector(".formatted-price__separator")
-            ?.textContent.trim() || "";
-        const fractional =
-          priceElement
-            .querySelector(".formatted-price__fractional")
-            ?.textContent.trim() || "";
+        currency = priceElement.querySelector(".formatted-price__currency")?.textContent.trim() || null;
+        const decimal = priceElement.querySelector(".formatted-price__decimal")?.textContent.trim() || "";
+        const separator = priceElement.querySelector(".formatted-price__separator")?.textContent.trim() || "";
+        const fractional = priceElement.querySelector(".formatted-price__fractional")?.textContent.trim() || "";
         price = `${decimal}${separator}${fractional}`.trim(); // e.g., "1.049,90"
       }
 
       const titleElement = document.querySelector(".product__title-name");
       const title = titleElement ? titleElement.textContent.trim() : null;
 
-      const brandElement = document.querySelector(
-        ".pdp__accordion-title strong"
-      );
+      const brandElement = document.querySelector(".pdp__accordion-title strong");
       const brand = brandElement ? brandElement.textContent.trim() : null;
 
-      const imageElements = document.querySelectorAll(
-        ".product-thumbnails__slot img"
-      );
+      const imageElements = document.querySelectorAll(".product-thumbnails__slot img");
       const imageSet = new Set();
       imageElements.forEach((img) => {
         const zoomedSrc = img.getAttribute("data-zoomed-src");
@@ -154,15 +138,18 @@ const scrapeProductDetails = async (page, url) => {
       const ratingElement = document.querySelector(".reviews-average-rating");
       const rating = ratingElement ? ratingElement.textContent.trim() : null;
 
-      const descriptionElement = document.querySelector(
-        ".product-information__text"
-      );
-      const description = descriptionElement
-        ? descriptionElement.textContent.trim()
-        : null;
+      const descriptionElement = document.querySelector(".product-information__text");
+      const description = descriptionElement ? descriptionElement.textContent.trim() : null;
+
+      const breadcrumbItems = document.querySelectorAll(".e2-breadcrumbs__items .e2-breadcrumbs__link");
+      const categoriesArray = Array.from(breadcrumbItems).map(item => item.textContent.trim());
+      const categories = categoriesArray.join(">");
+
+      // Extract productId from the URL
+      const productId = productUrl.split("/").pop(); // e.g., "BP_170637"
 
       return {
-        url,
+        url: productUrl,
         title, // e.g., "L'Oreal Paris True Match Fondöten No: 1N"
         brand, // e.g., "LOREAL PARIS"
         price,
@@ -170,20 +157,12 @@ const scrapeProductDetails = async (page, url) => {
         images, // e.g., "/medias/.../prd-front-170637_1200x1200.jpg;/medias/.../prd-side-170637_1200x1200.jpg;..."
         rating, // e.g., "4.7"
         description, // e.g., product description text
+        categories, // e.g., "Ana Sayfa>Makyaj>Yüz Makyajı>Fondöten"
+        productId, // e.g., "BP_170637"
       };
-    });
+    }, url); // Pass the url parameter to page.evaluate
 
-    console.log(
-      `Scraped product: ${details.title} by ${details.brand} - ${
-        details.price
-      } ${details.currency}, Rating: ${details.rating}, with ${
-        details.images.split(";").length
-      } images, Description: ${
-        details.description
-          ? details.description.substring(0, 50) + "..."
-          : "N/A"
-      } from ${url}`
-    );
+    console.log(`Scraped product: ${details.title} by ${details.brand} - ${details.price} ${details.currency}, Rating: ${details.rating}, Categories: ${details.categories}, Product ID: ${details.productId}, with ${details.images.split(";").length} images, Description: ${details.description ? details.description.substring(0, 50) + "..." : "N/A"} from ${url}`);
     return details;
   } catch (error) {
     console.error(`Error scraping product at ${url}:`, error);
@@ -196,6 +175,8 @@ const scrapeProductDetails = async (page, url) => {
       images: null,
       rating: null,
       description: null,
+      categories: null,
+      productId: null,
       error: error.message,
     };
   }
@@ -266,7 +247,9 @@ const scrapePagination = async (page, baseUrl) => {
     } else {
       allItems.push(...items);
       fs.writeFileSync(outputFileName, JSON.stringify(allItems, null, 2));
-      console.log(`Progress: ${allItems.length}/${totalItems} items collected`);
+      console.log(
+        `Progress: ${allItems.length}/${totalItems} items collected`
+      );
     }
 
     if (totalItems && allItems.length >= totalItems) {
@@ -331,6 +314,8 @@ const scrapeMultipleUrls = async () => {
   try {
     browser = await launchBrowser();
 
+    for (const baseUrl of urls)自主from baseUrl import "https://raw.githubusercontent.com/mahdiASC/grok-created-by-xAI/main/script.js"
+
     for (const baseUrl of urls) {
       console.log(`Starting scraping for: ${baseUrl}`);
       const page = await browser.newPage();
@@ -346,10 +331,7 @@ const scrapeMultipleUrls = async () => {
       const productPage = await browser.newPage();
       const detailedItems = [];
       for (const item of items) {
-        const productDetails = await scrapeProductDetails(
-          productPage,
-          item.url
-        );
+        const productDetails = await scrapeProductDetails(productPage, item.url);
         detailedItems.push(productDetails);
         fs.writeFileSync(
           outputFileName,
