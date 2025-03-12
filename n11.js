@@ -45,7 +45,7 @@ const extractProductUrls = async (page) => {
 };
 
 const scrollAndLoad = async (page, baseUrl) => {
-  console.log(`Starting scroll for: ${baseUrl}`);
+  console.log(`Starting process for: ${baseUrl}`);
   await page.goto(baseUrl, { waitUntil: "networkidle2" });
   await delay(3000);
 
@@ -55,88 +55,89 @@ const scrollAndLoad = async (page, baseUrl) => {
     );
     return resultElement ? parseInt(resultElement.textContent.trim(), 10) : 0;
   });
-  console.log(`Total products expected: ${totalProducts}`);
+  console.log(`Total products expected: ${totalProducts || "Unknown"}`);
 
-  let loadedProducts = 0;
-  let scrollPosition = 0;
+  let allProductUrls = new Set();
+  let currentPage = 1;
+  let lastPage = null;
 
   while (!shouldStop) {
-    await page.evaluate((pos) => {
-      window.scrollTo(0, pos);
-    }, scrollPosition);
-    scrollPosition += 500;
-    await delay(1000);
+    let scrollPosition = 0;
+    console.log(`Processing page ${currentPage}...`);
+    let fWrapperVisible = false;
 
-    const currentProducts = await page.evaluate(() => {
-      return document.querySelectorAll(".columnContent").length;
-    });
-    console.log(
-      `Loaded products: ${currentProducts}/${totalProducts} at scroll position: ${scrollPosition}`
-    );
+    while (!shouldStop && !fWrapperVisible) {
+      await page.evaluate((pos) => {
+        window.scrollTo(0, pos);
+      }, scrollPosition);
+      scrollPosition += 500;
+      await delay(2000);
 
-    const feedbackAreaVisible = await page.evaluate(() => {
-      const feedbackArea = document.querySelector(".feedback-area");
-      if (feedbackArea) {
-        const rect = feedbackArea.getBoundingClientRect();
+      const currentUrls = await extractProductUrls(page);
+      currentUrls.forEach((url) => allProductUrls.add(url));
+      console.log(
+        `Loaded ${allProductUrls.size}/${
+          totalProducts || "unknown"
+        } products at scroll position: ${scrollPosition}`
+      );
+
+      fWrapperVisible = await page.evaluate(() => {
+        const fWrapper = document.querySelector(".fWrapper");
+        if (!fWrapper) return false;
+        const rect = fWrapper.getBoundingClientRect();
         return rect.top >= 0 && rect.top <= window.innerHeight;
-      }
-      return false;
-    });
-
-    if (feedbackAreaVisible) {
-      console.log(
-        "Reached feedback-area, waiting 10 seconds for new products..."
-      );
-      await delay(10000);
-
-      const newProductCount = await page.evaluate(() => {
-        return document.querySelectorAll(".columnContent").length;
       });
-      console.log(
-        `New product count after waiting: ${newProductCount}/${totalProducts}`
-      );
-      loadedProducts = newProductCount;
 
-      if (loadedProducts < totalProducts) {
-        console.log("Not enough products loaded, scrolling back to top...");
-        await page.evaluate(() => {
-          window.scrollTo(0, 0);
-        });
-        await delay(2000);
-        scrollPosition = 0;
-        console.log("Scrolling down again...");
+      if (fWrapperVisible) {
+        console.log(`Reached fWrapper on page ${currentPage}.`);
       }
-    } else {
-      loadedProducts = currentProducts;
     }
 
-    if (loadedProducts >= totalProducts) {
-      console.log(`All ${totalProducts} products loaded. Stopping scroll.`);
+    const paginationInfo = await page.evaluate(() => {
+      const activePage = document.querySelector(".pagination .active");
+      const pages = Array.from(
+        document.querySelectorAll(".pagination a[data-page]")
+      );
+      const current = activePage
+        ? parseInt(activePage.getAttribute("data-page"), 10)
+        : 1;
+      const last =
+        pages.length > 0
+          ? Math.max(
+              ...pages.map((p) => parseInt(p.getAttribute("data-page"), 10))
+            )
+          : current;
+      return { current, last };
+    });
+
+    currentPage = paginationInfo.current;
+    if (!lastPage) lastPage = paginationInfo.last;
+    console.log(`Current page: ${currentPage}, Last page: ${lastPage}`);
+
+    if (totalProducts > 0 && allProductUrls.size >= totalProducts) {
+      console.log(`All ${totalProducts} products loaded.`);
+      break;
+    }
+    if (currentPage >= lastPage) {
+      console.log(`Reached the last page (${lastPage}).`);
       break;
     }
 
-    const documentHeight = await page.evaluate(
-      () => document.body.scrollHeight
-    );
-    if (scrollPosition >= documentHeight) {
-      console.log("Reached end of page.");
-      if (loadedProducts < totalProducts) {
-        console.log("Not enough products, scrolling back to top...");
-        await page.evaluate(() => {
-          window.scrollTo(0, 0);
-        });
-        await delay(2000);
-        scrollPosition = 0;
-        console.log("Scrolling down again...");
-      } else {
-        console.log("All products loaded despite reaching end.");
-        break;
-      }
+    const nextPage = currentPage + 1;
+    const nextUrl = `${baseUrl.split("?")[0]}?pg=${nextPage}`;
+    console.log(`Navigating to next page: ${nextUrl}`);
+    try {
+      await page.goto(nextUrl, { waitUntil: "networkidle2" });
+      await delay(3000);
+      currentPage = nextPage;
+    } catch (error) {
+      console.error(`Failed to navigate to ${nextUrl}:`, error);
+      break;
     }
   }
 
-  const productUrls = await extractProductUrls(page);
-  console.log(`Collected ${productUrls.length} product URLs.`);
+  const productUrls = Array.from(allProductUrls);
+  console.log(`Collected ${productUrls.length} unique product URLs.`);
 
   return productUrls;
 };
@@ -148,11 +149,9 @@ const scrapeProductDetails = async (page, url) => {
     await delay(2000);
 
     const details = await page.evaluate(() => {
-      // Extract title
       const titleElement = document.querySelector(".unf-p-title .proName");
       const title = titleElement ? titleElement.textContent.trim() : null;
 
-      // Extract brand
       let brand = null;
       const propItems = document.querySelectorAll(".unf-prop-list-item");
       for (const item of propItems) {
@@ -166,19 +165,20 @@ const scrapeProductDetails = async (page, url) => {
         }
       }
 
-      // Extract price and currency
       const priceElement = document.querySelector(".newPrice ins");
       let price = null;
       let currency = null;
       if (priceElement) {
-        const priceText = priceElement.textContent.trim();
-        const priceMatch = priceText.match(/(\d+,\d+)/);
-        price = priceMatch ? parseFloat(priceMatch[0].replace(",", ".")) : null;
+        price = priceElement.getAttribute("content")
+          ? parseFloat(priceElement.getAttribute("content"))
+          : null;
         const currencyElement = priceElement.querySelector("span");
-        currency = currencyElement ? currencyElement.textContent.trim() : null;
+        currency = currencyElement
+          ? currencyElement.getAttribute("content") ||
+            currencyElement.textContent.trim()
+          : null;
       }
 
-      // Extract images
       const imageElements = document.querySelectorAll(
         ".unf-p-thumbs .unf-p-thumbs-item img"
       );
@@ -187,7 +187,6 @@ const scrapeProductDetails = async (page, url) => {
         .filter((src) => src && src !== "");
       const images = imageUrls.length > 0 ? imageUrls.join(";") : null;
 
-      // Extract rating (favorite count)
       const ratingElement = document.querySelector(
         ".favorite-button-content .wishListCount"
       );
@@ -241,11 +240,18 @@ const scrapeMultipleUrls = async () => {
   try {
     browser = await launchBrowser();
 
-    // Array to hold all products across all URLs
     const allProducts = [];
+    const allProductUrls = [];
 
+    // Create n11 directory inside output
+    const n11Dir = path.join(outputDir, "n11");
+    if (!fs.existsSync(n11Dir)) {
+      fs.mkdirSync(n11Dir, { recursive: true });
+    }
+
+    // Step 1: Collect all product URLs
     for (const baseUrl of urls) {
-      console.log(`Starting process for: ${baseUrl}`);
+      console.log(`Collecting URLs for: ${baseUrl}`);
       const mainPage = await browser.newPage();
       await mainPage.setViewport({ width: 1366, height: 768 });
       await mainPage.setUserAgent(
@@ -253,25 +259,28 @@ const scrapeMultipleUrls = async () => {
       );
 
       const productUrls = await scrollAndLoad(mainPage, baseUrl);
+      productUrls.forEach((url) => {
+        const absoluteUrl = url.startsWith("http")
+          ? url
+          : `${baseUrl.split("/").slice(0, 3).join("/")}${url}`;
+        allProductUrls.push(absoluteUrl);
+      });
       await mainPage.close();
-
-      // Process each product in a new tab
-      for (const productUrl of productUrls) {
-        const productPage = await browser.newPage();
-        const absoluteUrl = productUrl.startsWith("http")
-          ? productUrl
-          : `${baseUrl.split("/").slice(0, 3).join("/")}${productUrl}`;
-        const details = await scrapeProductDetails(productPage, absoluteUrl);
-        allProducts.push(details);
-        await productPage.close();
-      }
-
-      console.log(`Finished processing for: ${baseUrl}\n`);
-      shouldStop = false;
+      console.log(`Finished collecting URLs for: ${baseUrl}\n`);
     }
 
-    // Save output as a flat array
-    const outputFileName = path.join(outputDir, `products_${dateStr}.json`);
+    console.log(`Total unique URLs collected: ${allProductUrls.length}`);
+
+    // Step 2: Process all product URLs
+    for (const productUrl of allProductUrls) {
+      const productPage = await browser.newPage();
+      const details = await scrapeProductDetails(productPage, productUrl);
+      allProducts.push(details);
+      await productPage.close();
+    }
+
+    // Save to n11 folder
+    const outputFileName = path.join(n11Dir, `products_${dateStr}.json`);
     fs.writeFileSync(outputFileName, JSON.stringify(allProducts, null, 2));
 
     await browser.close();
