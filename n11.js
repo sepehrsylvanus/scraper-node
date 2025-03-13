@@ -9,7 +9,6 @@ if (!fs.existsSync(outputDir)) {
 
 let browser;
 let shouldStop = false;
-let isFirstProduct = true;
 
 const today = new Date("2025-03-10");
 const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
@@ -54,7 +53,10 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
     const resultElement = document.querySelector(
       ".listOptionHolder .resultText strong"
     );
-    return resultElement ? parseInt(resultElement.textContent.trim(), 10) : 0;
+    if (!resultElement) return 0;
+    const text = resultElement.textContent.trim();
+    const cleanedNumber = text.replace(/[^0-9-]/g, "");
+    return cleanedNumber ? parseInt(cleanedNumber, 10) : 0;
   });
   console.log(`Total products expected: ${totalProducts || "Unknown"}`);
 
@@ -86,11 +88,10 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
       break;
     }
 
-    // Check if there's a next page
     const hasNextPage = await page.evaluate(() => {
       const nextButton = document.querySelector(
         ".pagination a.next:not(.disabled)"
-      ); // Adjust selector if needed
+      );
       return !!nextButton;
     });
 
@@ -271,14 +272,13 @@ const initializeOutputFile = (outputFileName) => {
   fs.writeFileSync(outputFileName, "[\n");
 };
 
-const saveProductToFile = (product, outputFileName) => {
+const saveProductToFile = (product, outputFileName, isFirst) => {
   const productJson = JSON.stringify(product, null, 2);
-  const prefix = isFirstProduct ? "  " : ",\n  ";
+  const prefix = isFirst ? "  " : ",\n  ";
   fs.appendFileSync(
     outputFileName,
     prefix + productJson.split("\n").join("\n  ")
   );
-  if (isFirstProduct) isFirstProduct = false;
 };
 
 const finalizeOutputFile = (outputFileName) => {
@@ -298,18 +298,25 @@ const scrapeMultipleUrls = async () => {
   try {
     browser = await launchBrowser();
 
-    const processedUrls = new Set();
-    const allProductUrls = [];
     const n11Dir = path.join(outputDir, "n11");
     if (!fs.existsSync(n11Dir)) {
       fs.mkdirSync(n11Dir, { recursive: true });
     }
 
-    const outputFileName = path.join(n11Dir, `products_${dateStr}.json`);
-    initializeOutputFile(outputFileName);
-
     for (const baseUrl of urls) {
       console.log(`\nProcessing URL: ${baseUrl}`);
+      const processedUrls = new Set(); // Reset for each URL
+      const allProductUrls = [];
+      let isFirstProduct = true; // Reset for each URL
+
+      // Generate unique filename for this URL
+      const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50); // Simple slug from URL
+      const outputFileName = path.join(
+        n11Dir,
+        `products_${dateStr}_${urlSlug}.json`
+      );
+      initializeOutputFile(outputFileName);
+
       let totalProducts = 0;
 
       // Initial scrape
@@ -334,8 +341,9 @@ const scrapeMultipleUrls = async () => {
         const productPage = await browser.newPage();
         try {
           const details = await scrapeProductDetails(productPage, productUrl);
-          saveProductToFile(details, outputFileName);
+          saveProductToFile(details, outputFileName, isFirstProduct);
           processedUrls.add(productUrl);
+          isFirstProduct = false;
         } catch (error) {
           console.error(`Skipping product ${productUrl} due to error:`, error);
         } finally {
@@ -364,13 +372,13 @@ const scrapeMultipleUrls = async () => {
         await retryPage.close();
         console.log(`Retry collected ${newUrls.length} new product URLs.`);
 
-        // Process new URLs
         for (const productUrl of newUrls) {
           const productPage = await browser.newPage();
           try {
             const details = await scrapeProductDetails(productPage, productUrl);
-            saveProductToFile(details, outputFileName);
+            saveProductToFile(details, outputFileName, isFirstProduct);
             processedUrls.add(productUrl);
+            isFirstProduct = false;
           } catch (error) {
             console.error(
               `Skipping product ${productUrl} due to error:`,
@@ -381,7 +389,6 @@ const scrapeMultipleUrls = async () => {
           }
         }
 
-        // Stop if no new products were found
         if (processedUrls.size === previousSize) {
           console.log(
             `No new products found in retry. Stopping further attempts.`
@@ -390,27 +397,19 @@ const scrapeMultipleUrls = async () => {
         }
       }
 
+      finalizeOutputFile(outputFileName);
       console.log(
         `Finished processing ${baseUrl}. Total collected: ${processedUrls.size}/${totalProducts}`
       );
+      console.log(`Data saved to ${outputFileName}`);
     }
 
-    finalizeOutputFile(outputFileName);
     await browser.close();
-    console.log(
-      `\nAll URLs processed successfully. Data saved to ${outputFileName}`
-    );
-    console.log(`Total products processed: ${processedUrls.size}`);
+    console.log("\nAll URLs processed successfully.");
     process.exit(0);
   } catch (error) {
     console.error("Error during processing:", error);
     if (browser) await browser.close();
-    const outputFileName = path.join(
-      outputDir,
-      "n11",
-      `products_${dateStr}.json`
-    );
-    finalizeOutputFile(outputFileName);
     process.exit(1);
   }
 };
@@ -419,12 +418,6 @@ process.on("SIGINT", async () => {
   console.log("Received SIGINT. Shutting down gracefully...");
   shouldStop = true;
   if (browser) await browser.close();
-  const outputFileName = path.join(
-    outputDir,
-    "n11",
-    `products_${dateStr}.json`
-  );
-  finalizeOutputFile(outputFileName);
   process.exit(0);
 });
 
