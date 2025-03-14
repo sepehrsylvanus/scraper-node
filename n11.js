@@ -120,7 +120,6 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
   console.log(
     `Collected ${productUrls.length} new unique product URLs in this pass.`
   );
-
   return { productUrls, totalProducts };
 };
 
@@ -268,21 +267,9 @@ const scrapeProductDetails = async (page, url) => {
   }
 };
 
-const initializeOutputFile = (outputFileName) => {
-  fs.writeFileSync(outputFileName, "[\n");
-};
-
-const saveProductToFile = (product, outputFileName, isFirst) => {
-  const productJson = JSON.stringify(product, null, 2);
-  const prefix = isFirst ? "  " : ",\n  ";
-  fs.appendFileSync(
-    outputFileName,
-    prefix + productJson.split("\n").join("\n  ")
-  );
-};
-
-const finalizeOutputFile = (outputFileName) => {
-  fs.appendFileSync(outputFileName, "\n]");
+// Function to save the entire array to the file
+const saveProductsToFile = (products, outputFileName) => {
+  fs.writeFileSync(outputFileName, JSON.stringify(products, null, 2));
 };
 
 const scrapeMultipleUrls = async () => {
@@ -305,17 +292,19 @@ const scrapeMultipleUrls = async () => {
 
     for (const baseUrl of urls) {
       console.log(`\nProcessing URL: ${baseUrl}`);
-      const processedUrls = new Set(); // Reset for each URL
+      const processedUrls = new Set();
       const allProductUrls = [];
-      let isFirstProduct = true; // Reset for each URL
+      const productsArray = []; // Array to hold all products
 
       // Generate unique filename for this URL
-      const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50); // Simple slug from URL
+      const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
       const outputFileName = path.join(
         n11Dir,
         `products_${dateStr}_${urlSlug}.json`
       );
-      initializeOutputFile(outputFileName);
+
+      // Initialize the file with an empty array
+      saveProductsToFile(productsArray, outputFileName);
 
       let totalProducts = 0;
 
@@ -341,9 +330,12 @@ const scrapeMultipleUrls = async () => {
         const productPage = await browser.newPage();
         try {
           const details = await scrapeProductDetails(productPage, productUrl);
-          saveProductToFile(details, outputFileName, isFirstProduct);
+          productsArray.push(details); // Add to array
           processedUrls.add(productUrl);
-          isFirstProduct = false;
+          saveProductsToFile(productsArray, outputFileName); // Write updated array to file
+          console.log(
+            `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
+          );
         } catch (error) {
           console.error(`Skipping product ${productUrl} due to error:`, error);
         } finally {
@@ -376,9 +368,12 @@ const scrapeMultipleUrls = async () => {
           const productPage = await browser.newPage();
           try {
             const details = await scrapeProductDetails(productPage, productUrl);
-            saveProductToFile(details, outputFileName, isFirstProduct);
+            productsArray.push(details); // Add to array
             processedUrls.add(productUrl);
-            isFirstProduct = false;
+            saveProductsToFile(productsArray, outputFileName); // Write updated array to file
+            console.log(
+              `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
+            );
           } catch (error) {
             console.error(
               `Skipping product ${productUrl} due to error:`,
@@ -397,11 +392,10 @@ const scrapeMultipleUrls = async () => {
         }
       }
 
-      finalizeOutputFile(outputFileName);
       console.log(
         `Finished processing ${baseUrl}. Total collected: ${processedUrls.size}/${totalProducts}`
       );
-      console.log(`Data saved to ${outputFileName}`);
+      console.log(`Final data saved to ${outputFileName}`);
     }
 
     await browser.close();
