@@ -272,6 +272,32 @@ const saveProductsToFile = (products, outputFileName) => {
   fs.writeFileSync(outputFileName, JSON.stringify(products, null, 2));
 };
 
+// Function to load existing products from files related to a base URL
+const loadExistingProducts = (baseUrl, dir) => {
+  const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
+  const existingFiles = fs
+    .readdirSync(dir)
+    .filter((file) => file.includes(urlSlug) && file.endsWith(".json"));
+
+  const existingProducts = new Set();
+  for (const file of existingFiles) {
+    try {
+      const filePath = path.join(dir, file);
+      const data = fs.readFileSync(filePath, "utf8");
+      const products = JSON.parse(data);
+      products.forEach((product) => {
+        if (product.url) existingProducts.add(product.url);
+      });
+    } catch (error) {
+      console.error(`Error reading file ${file}:`, error.message);
+    }
+  }
+  console.log(
+    `Loaded ${existingProducts.size} existing products for ${baseUrl}`
+  );
+  return existingProducts;
+};
+
 const scrapeMultipleUrls = async () => {
   const urls = process.argv.slice(2);
 
@@ -292,15 +318,20 @@ const scrapeMultipleUrls = async () => {
 
     for (const baseUrl of urls) {
       console.log(`\nProcessing URL: ${baseUrl}`);
-      const processedUrls = new Set();
+      const processedUrls = loadExistingProducts(baseUrl, n11Dir); // Load existing products
       const allProductUrls = [];
-      const productsArray = []; // Array to hold all products
+      const productsArray = [];
 
-      // Generate unique filename for this URL
+      // Generate unique filename with timestamp
       const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
+      const timestamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .replace("T", "_")
+        .split("Z")[0];
       const outputFileName = path.join(
         n11Dir,
-        `products_${dateStr}_${urlSlug}.json`
+        `products_${dateStr}_${urlSlug}_${timestamp}.json`
       );
 
       // Initialize the file with an empty array
@@ -323,16 +354,22 @@ const scrapeMultipleUrls = async () => {
       totalProducts = initialTotal;
       productUrls.forEach((url) => allProductUrls.push(url));
       await mainPage.close();
-      console.log(`Initial scrape collected ${productUrls.length} products.`);
+      console.log(
+        `Initial scrape collected ${productUrls.length} new products.`
+      );
 
       // Process initial batch
       for (const productUrl of productUrls) {
+        if (processedUrls.has(productUrl)) {
+          console.log(`Skipping already processed product: ${productUrl}`);
+          continue;
+        }
         const productPage = await browser.newPage();
         try {
           const details = await scrapeProductDetails(productPage, productUrl);
-          productsArray.push(details); // Add to array
+          productsArray.push(details);
           processedUrls.add(productUrl);
-          saveProductsToFile(productsArray, outputFileName); // Write updated array to file
+          saveProductsToFile(productsArray, outputFileName);
           console.log(
             `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
           );
@@ -365,12 +402,16 @@ const scrapeMultipleUrls = async () => {
         console.log(`Retry collected ${newUrls.length} new product URLs.`);
 
         for (const productUrl of newUrls) {
+          if (processedUrls.has(productUrl)) {
+            console.log(`Skipping already processed product: ${productUrl}`);
+            continue;
+          }
           const productPage = await browser.newPage();
           try {
             const details = await scrapeProductDetails(productPage, productUrl);
-            productsArray.push(details); // Add to array
+            productsArray.push(details);
             processedUrls.add(productUrl);
-            saveProductsToFile(productsArray, outputFileName); // Write updated array to file
+            saveProductsToFile(productsArray, outputFileName);
             console.log(
               `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
             );
