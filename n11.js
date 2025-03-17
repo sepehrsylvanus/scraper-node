@@ -18,11 +18,17 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const userAgents = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+];
+
 const launchBrowser = async () => {
   try {
     if (browser && browser.isConnected()) return browser;
     return await puppeteer.launch({
-      headless: true, // Switch to headless for production
+      headless: true,
       protocolTimeout: 86400000,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
@@ -44,36 +50,36 @@ const extractProductUrls = async (page) => {
   });
 };
 
-const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
-  console.log(`Starting page-by-page scrape for: ${baseUrl}`);
+const scrapeProducts = async (page, baseUrl, processedUrls = new Set()) => {
+  console.log(`Starting scrape for: ${baseUrl}`);
   await page.goto(baseUrl, { waitUntil: "networkidle2" });
-  await delay(3000);
+  await delay(3000 + Math.random() * 2000);
 
-  const totalProducts = await page.evaluate(() => {
+  const totalProductsEstimate = await page.evaluate(() => {
     const resultElement = document.querySelector(
       ".listOptionHolder .resultText strong"
     );
-    if (!resultElement) return 0;
-    const text = resultElement.textContent.trim();
+    const text = resultElement ? resultElement.textContent.trim() : "0";
+    console.log(`Raw total products text: ${text}`);
     const cleanedNumber = text.replace(/[^0-9-]/g, "");
     return cleanedNumber ? parseInt(cleanedNumber, 10) : 0;
   });
-  console.log(`Total products expected: ${totalProducts || "Unknown"}`);
+  console.log(
+    `Estimated total products: ${totalProductsEstimate || "Unknown"}`
+  );
 
   let allProductUrls = new Set();
   let currentPage = 1;
-  const maxRetriesPerPage = 3;
-  const maxGlobalRetries = 5;
+  const maxRetriesPerPage = 5;
+  const maxGlobalRetries = 10;
   let globalRetryCount = 0;
 
-  while (
-    !shouldStop &&
-    allProductUrls.size + processedUrls.size < totalProducts
-  ) {
+  // Try pagination first
+  while (!shouldStop) {
     console.log(
-      `Scraping page ${currentPage} (Attempt ${
+      `Scraping page ${currentPage} (Global retry ${
         globalRetryCount + 1
-      }/${maxGlobalRetries})...`
+      }/${maxGlobalRetries})`
     );
     let retries = 0;
     let currentUrls = [];
@@ -83,28 +89,12 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
         await page.evaluate(() =>
           window.scrollTo(0, document.body.scrollHeight)
         );
-        await delay(2000); // Wait for dynamic content
+        await delay(2000 + Math.random() * 1000);
         currentUrls = await extractProductUrls(page);
-        const expectedPerPage = Math.min(
-          28,
-          totalProducts - allProductUrls.size - processedUrls.size
-        );
-        if (currentUrls.length >= expectedPerPage || currentUrls.length === 0) {
-          console.log(
-            `Found ${currentUrls.length} products on page ${currentPage}`
-          );
-          break;
-        }
         console.log(
-          `Only ${
-            currentUrls.length
-          }/${expectedPerPage} products found. Retrying (${
-            retries + 1
-          }/${maxRetriesPerPage})...`
+          `Found ${currentUrls.length} products on page ${currentPage}`
         );
-        retries++;
-        await page.reload({ waitUntil: "networkidle2" });
-        await delay(5000 * (retries + 1));
+        break;
       } catch (error) {
         console.error(
           `Error on page ${currentPage}, retry ${retries + 1}:`,
@@ -113,10 +103,11 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
         retries++;
         if (retries === maxRetriesPerPage) {
           console.log(
-            `Max retries reached for page ${currentPage}. Proceeding with collected URLs.`
+            `Max retries reached for page ${currentPage}. Moving on.`
           );
           break;
         }
+        await page.reload({ waitUntil: "networkidle2" });
         await delay(5000 * (retries + 1));
       }
     }
@@ -125,198 +116,183 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
       const absoluteUrl = url.startsWith("http")
         ? url
         : `${baseUrl.split("/").slice(0, 3).join("/")}${url}`;
-      if (!processedUrls.has(absoluteUrl)) allProductUrls.add(absoluteUrl);
-    });
-    console.log(
-      `Collected ${allProductUrls.size}/${totalProducts} unique products so far`
-    );
-
-    if (allProductUrls.size + processedUrls.size >= totalProducts) {
-      console.log(`All ${totalProducts} products accounted for.`);
-      break;
-    }
-
-    const hasNextPage = await page.evaluate(() => {
-      const nextButton = document.querySelector(
-        ".pagination a.next:not(.disabled)"
-      );
-      return !!nextButton;
-    });
-
-    if (!hasNextPage) {
-      console.log(`No next page found after page ${currentPage}.`);
-      if (
-        allProductUrls.size + processedUrls.size < totalProducts &&
-        globalRetryCount < maxGlobalRetries
-      ) {
-        console.log(
-          `Missing ${
-            totalProducts - (allProductUrls.size + processedUrls.size)
-          } products. Retrying from page 1...`
-        );
-        globalRetryCount++;
-        currentPage = 1;
-        await page.goto(baseUrl, { waitUntil: "networkidle2" });
-        await delay(5000 * (globalRetryCount + 1));
-        continue;
+      if (!processedUrls.has(absoluteUrl)) {
+        allProductUrls.add(absoluteUrl);
+        console.log(`Added URL: ${absoluteUrl}`);
       }
+    });
+    console.log(`Collected ${allProductUrls.size} unique products so far`);
+
+    const hasNextPage = await page.evaluate(
+      () => !!document.querySelector(".pagination a.next:not(.disabled)")
+    );
+    if (
+      !hasNextPage ||
+      (totalProductsEstimate > 0 &&
+        allProductUrls.size >= totalProductsEstimate)
+    ) {
+      console.log(
+        `No next page or all ${totalProductsEstimate} products collected. Checking for infinite scroll...`
+      );
       break;
     }
 
-    const nextPage = currentPage + 1;
-    const nextUrl = `${baseUrl.split("?")[0]}?pg=${nextPage}`;
-    console.log(`Navigating to: ${nextUrl}`);
+    currentPage++;
+    const nextUrl = `${baseUrl.split("?")[0]}?pg=${currentPage}`;
     try {
       await page.goto(nextUrl, { waitUntil: "networkidle2", timeout: 30000 });
       await delay(3000 + Math.random() * 2000);
-      currentPage = nextPage;
     } catch (error) {
       console.error(`Failed to navigate to ${nextUrl}:`, error.message);
-      if (
-        allProductUrls.size + processedUrls.size < totalProducts &&
-        globalRetryCount < maxGlobalRetries
-      ) {
+      if (globalRetryCount < maxGlobalRetries) {
         globalRetryCount++;
         currentPage = 1;
         await page.goto(baseUrl, { waitUntil: "networkidle2" });
         await delay(5000 * (globalRetryCount + 1));
-        continue;
+      } else {
+        break;
       }
-      break;
+    }
+  }
+
+  // Fallback to infinite scrolling if pagination didn’t get all products
+  if (
+    totalProductsEstimate > allProductUrls.size ||
+    allProductUrls.size < 8000
+  ) {
+    console.log("Switching to infinite scroll mode...");
+    await page.goto(baseUrl, { waitUntil: "networkidle2" });
+    let previousHeight = 0;
+    while (!shouldStop) {
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await delay(3000 + Math.random() * 2000);
+      const currentUrls = await extractProductUrls(page);
+      currentUrls.forEach((url) => {
+        const absoluteUrl = url.startsWith("http")
+          ? url
+          : `${baseUrl.split("/").slice(0, 3).join("/")}${url}`;
+        if (!processedUrls.has(absoluteUrl)) allProductUrls.add(absoluteUrl);
+      });
+
+      const currentHeight = await page.evaluate(
+        () => document.body.scrollHeight
+      );
+      if (currentHeight === previousHeight) {
+        console.log("No new content loaded. Stopping scroll.");
+        break;
+      }
+      previousHeight = currentHeight;
+      console.log(`Infinite scroll collected ${allProductUrls.size} products`);
     }
   }
 
   const productUrls = Array.from(allProductUrls);
-  console.log(
-    `Collected ${productUrls.length} new unique product URLs in this pass.`
-  );
-  return { productUrls, totalProducts };
+  console.log(`Total unique product URLs collected: ${productUrls.length}`);
+  return { productUrls, totalProducts: totalProductsEstimate };
 };
 
 const scrapeProductDetails = async (page, url) => {
   try {
-    console.log(`Opening product page: ${url}`);
+    console.log(`Scraping product page: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-    await delay(2000);
+    await delay(2000 + Math.random() * 1000);
 
     const details = await page.evaluate((pageUrl) => {
-      try {
-        const titleElement = document.querySelector(".unf-p-title .proName");
-        const title = titleElement ? titleElement.textContent.trim() : null;
+      const titleElement = document.querySelector(".unf-p-title .proName");
+      const title = titleElement ? titleElement.textContent.trim() : null;
 
-        let brand = null;
-        const propItems = document.querySelectorAll(".unf-prop-list-item");
-        for (const item of propItems) {
-          const propTitle = item
+      let brand = null;
+      const propItems = document.querySelectorAll(".unf-prop-list-item");
+      for (const item of propItems) {
+        const propTitle = item
+          .querySelector(".unf-prop-list-title")
+          ?.textContent.trim();
+        if (propTitle === "Marka") {
+          const propValue = item.querySelector(".unf-prop-list-prop");
+          brand = propValue ? propValue.textContent.trim() : null;
+          break;
+        }
+      }
+
+      const priceElement = document.querySelector(".newPrice ins");
+      let price = priceElement?.getAttribute("content")
+        ? parseFloat(priceElement.getAttribute("content"))
+        : null;
+      const currency =
+        priceElement?.querySelector("span")?.getAttribute("content") ||
+        priceElement?.querySelector("span")?.textContent.trim() ||
+        null;
+
+      const imageElements = document.querySelectorAll(
+        ".unf-p-thumbs .unf-p-thumbs-item img"
+      );
+      const images =
+        Array.from(imageElements)
+          .map((img) => img.getAttribute("src"))
+          .filter((src) => src)
+          .join(";") || null;
+
+      const rating = document
+        .querySelector(".ratingCont .ratingScore")
+        ?.textContent.trim()
+        ? parseFloat(
+            document
+              .querySelector(".ratingCont .ratingScore")
+              .textContent.trim()
+          )
+        : null;
+
+      const shippingFee = document
+        .querySelector(".shipping-fee, .delivery-cost")
+        ?.textContent.replace(/[^\d.]/g, "")
+        ? parseFloat(
+            document
+              .querySelector(".shipping-fee, .delivery-cost")
+              .textContent.replace(/[^\d.]/g, "")
+          )
+        : null;
+
+      const description =
+        document.querySelector(".unf-info-desc")?.textContent.trim() || null;
+
+      const specifications = Array.from(
+        document.querySelectorAll(".unf-prop-list-item")
+      )
+        .map((item) => {
+          const name = item
             .querySelector(".unf-prop-list-title")
             ?.textContent.trim();
-          if (propTitle === "Marka") {
-            const propValue = item.querySelector(".unf-prop-list-prop");
-            brand = propValue ? propValue.textContent.trim() : null;
-            break;
-          }
-        }
+          const value = item
+            .querySelector(".unf-prop-list-prop")
+            ?.textContent.trim();
+          return name && value ? { name, value } : null;
+        })
+        .filter((spec) => spec);
 
-        const priceElement = document.querySelector(".newPrice ins");
-        let price = null;
-        let currency = null;
-        if (priceElement) {
-          price = priceElement.getAttribute("content")
-            ? parseFloat(priceElement.getAttribute("content"))
-            : null;
-          const currencyElement = priceElement.querySelector("span");
-          currency = currencyElement
-            ? currencyElement.getAttribute("content") ||
-              currencyElement.textContent.trim()
-            : null;
-        }
+      const categories =
+        document
+          .querySelector(".breadcrumb, .breadcrumbs")
+          ?.textContent.trim()
+          .replace(/\s+/g, ">") || null;
 
-        const imageElements = document.querySelectorAll(
-          ".unf-p-thumbs .unf-p-thumbs-item img"
-        );
-        const imageUrls = Array.from(imageElements)
-          .map((img) => img.getAttribute("src"))
-          .filter((src) => src && src !== "");
-        const images = imageUrls.length > 0 ? imageUrls.join(";") : null;
+      const productId = pageUrl.match(/-(\d+)(?:[?/#]|$)/)?.[1] || null;
 
-        const ratingElement = document.querySelector(
-          ".ratingCont .ratingScore"
-        );
-        let rating = null;
-        if (ratingElement) {
-          const ratingText = ratingElement.textContent.trim();
-          rating = ratingText ? parseFloat(ratingText) : null;
-        }
-
-        const shippingFeeElement =
-          document.querySelector(".shipping-fee") ||
-          document.querySelector(".delivery-cost");
-        const shippingFee = shippingFeeElement
-          ? parseFloat(shippingFeeElement.textContent.replace(/[^\d.]/g, ""))
-          : null;
-
-        const descriptionElement = document.querySelector(".unf-info-desc");
-        const description = descriptionElement
-          ? descriptionElement.textContent.trim()
-          : null;
-
-        const specItems = document.querySelectorAll(".unf-prop-list-item");
-        const specifications = Array.from(specItems)
-          .map((item) => {
-            const name = item
-              .querySelector(".unf-prop-list-title")
-              ?.textContent.trim();
-            const value = item
-              .querySelector(".unf-prop-list-prop")
-              ?.textContent.trim();
-            return name && value ? { name, value } : null;
-          })
-          .filter((spec) => spec !== null);
-
-        const categoriesElement =
-          document.querySelector(".breadcrumb") ||
-          document.querySelector(".breadcrumbs");
-        const categories = categoriesElement
-          ? categoriesElement.textContent.trim().replace(/\s+/g, ">")
-          : null;
-
-        const productIdMatch = pageUrl.match(/-(\d+)(?:[?/#]|$)/);
-        const productId = productIdMatch ? productIdMatch[1] : null;
-
-        return {
-          title,
-          brand,
-          price,
-          currency,
-          images,
-          rating,
-          shipping_fee: shippingFee,
-          description,
-          specifications,
-          categories,
-          productId,
-        };
-      } catch (evalError) {
-        console.error(`Evaluation error on ${pageUrl}:`, evalError);
-        throw evalError;
-      }
+      return {
+        title,
+        brand,
+        price,
+        currency,
+        images,
+        rating,
+        shipping_fee: shippingFee,
+        description,
+        specifications,
+        categories,
+        productId,
+      };
     }, url);
 
-    console.log(`Extracted details from ${url}:`, details);
-    return {
-      url,
-      title: details.title,
-      brand: details.brand,
-      price: details.price,
-      currency: details.currency,
-      images: details.images,
-      rating: details.rating,
-      shipping_fee: details.shipping_fee,
-      description: details.description,
-      specifications: details.specifications,
-      categories: details.categories,
-      productId: details.productId,
-    };
+    return { url, ...details };
   } catch (error) {
     console.error(`Error scraping product at ${url}:`, error.message);
     return {
@@ -346,16 +322,15 @@ const loadExistingProducts = (baseUrl, dir) => {
   const existingFiles = fs
     .readdirSync(dir)
     .filter((file) => file.includes(urlSlug) && file.endsWith(".json"));
-
   const existingProducts = new Set();
+
   for (const file of existingFiles) {
     try {
-      const filePath = path.join(dir, file);
-      const data = fs.readFileSync(filePath, "utf8");
+      const data = fs.readFileSync(path.join(dir, file), "utf8");
       const products = JSON.parse(data);
-      products.forEach((product) => {
-        if (product.url) existingProducts.add(product.url);
-      });
+      products.forEach(
+        (product) => product.url && existingProducts.add(product.url)
+      );
     } catch (error) {
       console.error(`Error reading file ${file}:`, error.message);
     }
@@ -368,21 +343,15 @@ const loadExistingProducts = (baseUrl, dir) => {
 
 const scrapeMultipleUrls = async () => {
   const urls = process.argv.slice(2);
-
-  if (urls.length === 0) {
-    console.error(
-      "No URLs provided. Usage: node script.js <url1> <url2> <url3> ..."
-    );
+  if (!urls.length) {
+    console.error("No URLs provided. Usage: node script.js <url1> <url2> ...");
     process.exit(1);
   }
 
   try {
     browser = await launchBrowser();
-
     const n11Dir = path.join(outputDir, "n11");
-    if (!fs.existsSync(n11Dir)) {
-      fs.mkdirSync(n11Dir, { recursive: true });
-    }
+    if (!fs.existsSync(n11Dir)) fs.mkdirSync(n11Dir, { recursive: true });
 
     for (const baseUrl of urls) {
       console.log(`\nProcessing URL: ${baseUrl}`);
@@ -402,30 +371,32 @@ const scrapeMultipleUrls = async () => {
 
       saveProductsToFile(productsArray, outputFileName);
 
-      let mainPage = await browser.newPage();
+      const mainPage = await browser.newPage();
       await mainPage.setViewport({ width: 1366, height: 768 });
       await mainPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        userAgents[Math.floor(Math.random() * userAgents.length)]
       );
 
-      const { productUrls, totalProducts } = await scrapePageByPage(
+      const { productUrls, totalProducts } = await scrapeProducts(
         mainPage,
         baseUrl,
         processedUrls
       );
       await mainPage.close();
 
-      // Process products in parallel chunks
       const chunkSize = 3;
       for (let i = 0; i < productUrls.length; i += chunkSize) {
         const chunk = productUrls.slice(i, i + chunkSize);
         await Promise.all(
           chunk.map(async (productUrl) => {
             if (processedUrls.has(productUrl)) {
-              console.log(`Skipping already processed product: ${productUrl}`);
+              console.log(`Skipping already processed: ${productUrl}`);
               return;
             }
             const productPage = await browser.newPage();
+            await productPage.setUserAgent(
+              userAgents[Math.floor(Math.random() * userAgents.length)]
+            );
             try {
               const details = await scrapeProductDetails(
                 productPage,
@@ -435,13 +406,12 @@ const scrapeMultipleUrls = async () => {
               processedUrls.add(productUrl);
               saveProductsToFile(productsArray, outputFileName);
               console.log(
-                `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
+                `Saved ${productsArray.length}/${
+                  totalProducts || "unknown"
+                } products`
               );
             } catch (error) {
-              console.error(
-                `Skipping product ${productUrl} due to error:`,
-                error
-              );
+              console.error(`Error processing ${productUrl}:`, error);
             } finally {
               await productPage.close();
             }
@@ -449,19 +419,19 @@ const scrapeMultipleUrls = async () => {
         );
       }
 
-      // Retry missing products
+      // Retry missing products if totalProducts is known and not reached
       while (totalProducts > 0 && processedUrls.size < totalProducts) {
         console.log(
-          `Only ${processedUrls.size}/${totalProducts} products collected. Retrying...`
+          `Retrying: ${processedUrls.size}/${totalProducts} collected`
         );
         const retryPage = await browser.newPage();
         await retryPage.setViewport({ width: 1366, height: 768 });
         await retryPage.setUserAgent(
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+          userAgents[Math.floor(Math.random() * userAgents.length)]
         );
 
         const previousSize = processedUrls.size;
-        const { productUrls: newUrls } = await scrapePageByPage(
+        const { productUrls: newUrls } = await scrapeProducts(
           retryPage,
           baseUrl,
           processedUrls
@@ -472,13 +442,11 @@ const scrapeMultipleUrls = async () => {
           const chunk = newUrls.slice(i, i + chunkSize);
           await Promise.all(
             chunk.map(async (productUrl) => {
-              if (processedUrls.has(productUrl)) {
-                console.log(
-                  `Skipping already processed product: ${productUrl}`
-                );
-                return;
-              }
+              if (processedUrls.has(productUrl)) return;
               const productPage = await browser.newPage();
+              await productPage.setUserAgent(
+                userAgents[Math.floor(Math.random() * userAgents.length)]
+              );
               try {
                 const details = await scrapeProductDetails(
                   productPage,
@@ -487,14 +455,8 @@ const scrapeMultipleUrls = async () => {
                 productsArray.push(details);
                 processedUrls.add(productUrl);
                 saveProductsToFile(productsArray, outputFileName);
-                console.log(
-                  `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
-                );
               } catch (error) {
-                console.error(
-                  `Skipping product ${productUrl} due to error:`,
-                  error
-                );
+                console.error(`Error retrying ${productUrl}:`, error);
               } finally {
                 await productPage.close();
               }
@@ -503,17 +465,17 @@ const scrapeMultipleUrls = async () => {
         }
 
         if (processedUrls.size === previousSize) {
-          console.log(
-            `No new products found in retry. Stopping further attempts.`
-          );
+          console.log("No new products found in retry. Stopping.");
           break;
         }
       }
 
       console.log(
-        `Finished processing ${baseUrl}. Total collected: ${processedUrls.size}/${totalProducts}`
+        `Finished ${baseUrl}. Collected: ${processedUrls.size}/${
+          totalProducts || "unknown"
+        }`
       );
-      console.log(`Final data saved to ${outputFileName}`);
+      console.log(`Data saved to ${outputFileName}`);
     }
 
     await browser.close();
@@ -527,7 +489,7 @@ const scrapeMultipleUrls = async () => {
 };
 
 process.on("SIGINT", async () => {
-  console.log("Received SIGINT. Shutting down gracefully...");
+  console.log("Received SIGINT. Shutting down...");
   shouldStop = true;
   if (browser) await browser.close();
   process.exit(0);
