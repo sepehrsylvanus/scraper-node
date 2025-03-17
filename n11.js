@@ -22,7 +22,7 @@ const launchBrowser = async () => {
   try {
     if (browser && browser.isConnected()) return browser;
     return await puppeteer.launch({
-      headless: false,
+      headless: true, // Switch to headless for production
       protocolTimeout: 86400000,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
@@ -62,19 +62,28 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
 
   let allProductUrls = new Set();
   let currentPage = 1;
-  const maxRetriesPerPage = 3; // Maximum retries per page if products are missing
+  const maxRetriesPerPage = 3;
+  const maxGlobalRetries = 5;
+  let globalRetryCount = 0;
 
   while (
     !shouldStop &&
-    (totalProducts === 0 ||
-      allProductUrls.size + processedUrls.size < totalProducts)
+    allProductUrls.size + processedUrls.size < totalProducts
   ) {
-    console.log(`Scraping page ${currentPage}...`);
+    console.log(
+      `Scraping page ${currentPage} (Attempt ${
+        globalRetryCount + 1
+      }/${maxGlobalRetries})...`
+    );
     let retries = 0;
     let currentUrls = [];
 
     while (retries < maxRetriesPerPage) {
       try {
+        await page.evaluate(() =>
+          window.scrollTo(0, document.body.scrollHeight)
+        );
+        await delay(2000); // Wait for dynamic content
         currentUrls = await extractProductUrls(page);
         const expectedPerPage = Math.min(
           28,
@@ -82,33 +91,33 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
         );
         if (currentUrls.length >= expectedPerPage || currentUrls.length === 0) {
           console.log(
-            `Found ${currentUrls.length} products on page ${currentPage}, proceeding...`
+            `Found ${currentUrls.length} products on page ${currentPage}`
           );
           break;
         }
         console.log(
           `Only ${
             currentUrls.length
-          }/${expectedPerPage} products found on page ${currentPage}. Retrying (${
+          }/${expectedPerPage} products found. Retrying (${
             retries + 1
           }/${maxRetriesPerPage})...`
         );
         retries++;
         await page.reload({ waitUntil: "networkidle2" });
-        await delay(5000);
+        await delay(5000 * (retries + 1));
       } catch (error) {
         console.error(
-          `Error extracting URLs on page ${currentPage}, retry ${retries + 1}:`,
+          `Error on page ${currentPage}, retry ${retries + 1}:`,
           error.message
         );
         retries++;
         if (retries === maxRetriesPerPage) {
           console.log(
-            `Max retries reached for page ${currentPage}. Moving forward with collected URLs.`
+            `Max retries reached for page ${currentPage}. Proceeding with collected URLs.`
           );
           break;
         }
-        await delay(5000);
+        await delay(5000 * (retries + 1));
       }
     }
 
@@ -116,15 +125,16 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
       const absoluteUrl = url.startsWith("http")
         ? url
         : `${baseUrl.split("/").slice(0, 3).join("/")}${url}`;
-      if (!processedUrls.has(absoluteUrl)) {
-        allProductUrls.add(absoluteUrl);
-      }
+      if (!processedUrls.has(absoluteUrl)) allProductUrls.add(absoluteUrl);
     });
     console.log(
-      `Collected ${allProductUrls.size}/${
-        totalProducts || "unknown"
-      } unique products on page ${currentPage}`
+      `Collected ${allProductUrls.size}/${totalProducts} unique products so far`
     );
+
+    if (allProductUrls.size + processedUrls.size >= totalProducts) {
+      console.log(`All ${totalProducts} products accounted for.`);
+      break;
+    }
 
     const hasNextPage = await page.evaluate(() => {
       const nextButton = document.querySelector(
@@ -134,19 +144,44 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
     });
 
     if (!hasNextPage) {
-      console.log(`No next page available after page ${currentPage}.`);
+      console.log(`No next page found after page ${currentPage}.`);
+      if (
+        allProductUrls.size + processedUrls.size < totalProducts &&
+        globalRetryCount < maxGlobalRetries
+      ) {
+        console.log(
+          `Missing ${
+            totalProducts - (allProductUrls.size + processedUrls.size)
+          } products. Retrying from page 1...`
+        );
+        globalRetryCount++;
+        currentPage = 1;
+        await page.goto(baseUrl, { waitUntil: "networkidle2" });
+        await delay(5000 * (globalRetryCount + 1));
+        continue;
+      }
       break;
     }
 
     const nextPage = currentPage + 1;
     const nextUrl = `${baseUrl.split("?")[0]}?pg=${nextPage}`;
-    console.log(`Navigating to next page: ${nextUrl}`);
+    console.log(`Navigating to: ${nextUrl}`);
     try {
       await page.goto(nextUrl, { waitUntil: "networkidle2", timeout: 30000 });
-      await delay(3000);
+      await delay(3000 + Math.random() * 2000);
       currentPage = nextPage;
     } catch (error) {
-      console.log(`Failed to navigate to ${nextUrl}:`, error.message);
+      console.error(`Failed to navigate to ${nextUrl}:`, error.message);
+      if (
+        allProductUrls.size + processedUrls.size < totalProducts &&
+        globalRetryCount < maxGlobalRetries
+      ) {
+        globalRetryCount++;
+        currentPage = 1;
+        await page.goto(baseUrl, { waitUntil: "networkidle2" });
+        await delay(5000 * (globalRetryCount + 1));
+        continue;
+      }
       break;
     }
   }
@@ -157,3 +192,345 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
   );
   return { productUrls, totalProducts };
 };
+
+const scrapeProductDetails = async (page, url) => {
+  try {
+    console.log(`Opening product page: ${url}`);
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+    await delay(2000);
+
+    const details = await page.evaluate((pageUrl) => {
+      try {
+        const titleElement = document.querySelector(".unf-p-title .proName");
+        const title = titleElement ? titleElement.textContent.trim() : null;
+
+        let brand = null;
+        const propItems = document.querySelectorAll(".unf-prop-list-item");
+        for (const item of propItems) {
+          const propTitle = item
+            .querySelector(".unf-prop-list-title")
+            ?.textContent.trim();
+          if (propTitle === "Marka") {
+            const propValue = item.querySelector(".unf-prop-list-prop");
+            brand = propValue ? propValue.textContent.trim() : null;
+            break;
+          }
+        }
+
+        const priceElement = document.querySelector(".newPrice ins");
+        let price = null;
+        let currency = null;
+        if (priceElement) {
+          price = priceElement.getAttribute("content")
+            ? parseFloat(priceElement.getAttribute("content"))
+            : null;
+          const currencyElement = priceElement.querySelector("span");
+          currency = currencyElement
+            ? currencyElement.getAttribute("content") ||
+              currencyElement.textContent.trim()
+            : null;
+        }
+
+        const imageElements = document.querySelectorAll(
+          ".unf-p-thumbs .unf-p-thumbs-item img"
+        );
+        const imageUrls = Array.from(imageElements)
+          .map((img) => img.getAttribute("src"))
+          .filter((src) => src && src !== "");
+        const images = imageUrls.length > 0 ? imageUrls.join(";") : null;
+
+        const ratingElement = document.querySelector(
+          ".ratingCont .ratingScore"
+        );
+        let rating = null;
+        if (ratingElement) {
+          const ratingText = ratingElement.textContent.trim();
+          rating = ratingText ? parseFloat(ratingText) : null;
+        }
+
+        const shippingFeeElement =
+          document.querySelector(".shipping-fee") ||
+          document.querySelector(".delivery-cost");
+        const shippingFee = shippingFeeElement
+          ? parseFloat(shippingFeeElement.textContent.replace(/[^\d.]/g, ""))
+          : null;
+
+        const descriptionElement = document.querySelector(".unf-info-desc");
+        const description = descriptionElement
+          ? descriptionElement.textContent.trim()
+          : null;
+
+        const specItems = document.querySelectorAll(".unf-prop-list-item");
+        const specifications = Array.from(specItems)
+          .map((item) => {
+            const name = item
+              .querySelector(".unf-prop-list-title")
+              ?.textContent.trim();
+            const value = item
+              .querySelector(".unf-prop-list-prop")
+              ?.textContent.trim();
+            return name && value ? { name, value } : null;
+          })
+          .filter((spec) => spec !== null);
+
+        const categoriesElement =
+          document.querySelector(".breadcrumb") ||
+          document.querySelector(".breadcrumbs");
+        const categories = categoriesElement
+          ? categoriesElement.textContent.trim().replace(/\s+/g, ">")
+          : null;
+
+        const productIdMatch = pageUrl.match(/-(\d+)(?:[?/#]|$)/);
+        const productId = productIdMatch ? productIdMatch[1] : null;
+
+        return {
+          title,
+          brand,
+          price,
+          currency,
+          images,
+          rating,
+          shipping_fee: shippingFee,
+          description,
+          specifications,
+          categories,
+          productId,
+        };
+      } catch (evalError) {
+        console.error(`Evaluation error on ${pageUrl}:`, evalError);
+        throw evalError;
+      }
+    }, url);
+
+    console.log(`Extracted details from ${url}:`, details);
+    return {
+      url,
+      title: details.title,
+      brand: details.brand,
+      price: details.price,
+      currency: details.currency,
+      images: details.images,
+      rating: details.rating,
+      shipping_fee: details.shipping_fee,
+      description: details.description,
+      specifications: details.specifications,
+      categories: details.categories,
+      productId: details.productId,
+    };
+  } catch (error) {
+    console.error(`Error scraping product at ${url}:`, error.message);
+    return {
+      url,
+      title: null,
+      brand: null,
+      price: null,
+      currency: null,
+      images: null,
+      rating: null,
+      shipping_fee: null,
+      description: null,
+      specifications: [],
+      categories: null,
+      productId: null,
+      error: error.message,
+    };
+  }
+};
+
+const saveProductsToFile = (products, outputFileName) => {
+  fs.writeFileSync(outputFileName, JSON.stringify(products, null, 2));
+};
+
+const loadExistingProducts = (baseUrl, dir) => {
+  const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
+  const existingFiles = fs
+    .readdirSync(dir)
+    .filter((file) => file.includes(urlSlug) && file.endsWith(".json"));
+
+  const existingProducts = new Set();
+  for (const file of existingFiles) {
+    try {
+      const filePath = path.join(dir, file);
+      const data = fs.readFileSync(filePath, "utf8");
+      const products = JSON.parse(data);
+      products.forEach((product) => {
+        if (product.url) existingProducts.add(product.url);
+      });
+    } catch (error) {
+      console.error(`Error reading file ${file}:`, error.message);
+    }
+  }
+  console.log(
+    `Loaded ${existingProducts.size} existing products for ${baseUrl}`
+  );
+  return existingProducts;
+};
+
+const scrapeMultipleUrls = async () => {
+  const urls = process.argv.slice(2);
+
+  if (urls.length === 0) {
+    console.error(
+      "No URLs provided. Usage: node script.js <url1> <url2> <url3> ..."
+    );
+    process.exit(1);
+  }
+
+  try {
+    browser = await launchBrowser();
+
+    const n11Dir = path.join(outputDir, "n11");
+    if (!fs.existsSync(n11Dir)) {
+      fs.mkdirSync(n11Dir, { recursive: true });
+    }
+
+    for (const baseUrl of urls) {
+      console.log(`\nProcessing URL: ${baseUrl}`);
+      const processedUrls = loadExistingProducts(baseUrl, n11Dir);
+      const productsArray = [];
+
+      const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
+      const timestamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .replace("T", "_")
+        .split("Z")[0];
+      const outputFileName = path.join(
+        n11Dir,
+        `products_${dateStr}_${urlSlug}_${timestamp}.json`
+      );
+
+      saveProductsToFile(productsArray, outputFileName);
+
+      let mainPage = await browser.newPage();
+      await mainPage.setViewport({ width: 1366, height: 768 });
+      await mainPage.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+      );
+
+      const { productUrls, totalProducts } = await scrapePageByPage(
+        mainPage,
+        baseUrl,
+        processedUrls
+      );
+      await mainPage.close();
+
+      // Process products in parallel chunks
+      const chunkSize = 3;
+      for (let i = 0; i < productUrls.length; i += chunkSize) {
+        const chunk = productUrls.slice(i, i + chunkSize);
+        await Promise.all(
+          chunk.map(async (productUrl) => {
+            if (processedUrls.has(productUrl)) {
+              console.log(`Skipping already processed product: ${productUrl}`);
+              return;
+            }
+            const productPage = await browser.newPage();
+            try {
+              const details = await scrapeProductDetails(
+                productPage,
+                productUrl
+              );
+              productsArray.push(details);
+              processedUrls.add(productUrl);
+              saveProductsToFile(productsArray, outputFileName);
+              console.log(
+                `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
+              );
+            } catch (error) {
+              console.error(
+                `Skipping product ${productUrl} due to error:`,
+                error
+              );
+            } finally {
+              await productPage.close();
+            }
+          })
+        );
+      }
+
+      // Retry missing products
+      while (totalProducts > 0 && processedUrls.size < totalProducts) {
+        console.log(
+          `Only ${processedUrls.size}/${totalProducts} products collected. Retrying...`
+        );
+        const retryPage = await browser.newPage();
+        await retryPage.setViewport({ width: 1366, height: 768 });
+        await retryPage.setUserAgent(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        );
+
+        const previousSize = processedUrls.size;
+        const { productUrls: newUrls } = await scrapePageByPage(
+          retryPage,
+          baseUrl,
+          processedUrls
+        );
+        await retryPage.close();
+
+        for (let i = 0; i < newUrls.length; i += chunkSize) {
+          const chunk = newUrls.slice(i, i + chunkSize);
+          await Promise.all(
+            chunk.map(async (productUrl) => {
+              if (processedUrls.has(productUrl)) {
+                console.log(
+                  `Skipping already processed product: ${productUrl}`
+                );
+                return;
+              }
+              const productPage = await browser.newPage();
+              try {
+                const details = await scrapeProductDetails(
+                  productPage,
+                  productUrl
+                );
+                productsArray.push(details);
+                processedUrls.add(productUrl);
+                saveProductsToFile(productsArray, outputFileName);
+                console.log(
+                  `Saved ${productsArray.length}/${totalProducts} products to ${outputFileName}`
+                );
+              } catch (error) {
+                console.error(
+                  `Skipping product ${productUrl} due to error:`,
+                  error
+                );
+              } finally {
+                await productPage.close();
+              }
+            })
+          );
+        }
+
+        if (processedUrls.size === previousSize) {
+          console.log(
+            `No new products found in retry. Stopping further attempts.`
+          );
+          break;
+        }
+      }
+
+      console.log(
+        `Finished processing ${baseUrl}. Total collected: ${processedUrls.size}/${totalProducts}`
+      );
+      console.log(`Final data saved to ${outputFileName}`);
+    }
+
+    await browser.close();
+    console.log("\nAll URLs processed successfully.");
+    process.exit(0);
+  } catch (error) {
+    console.error("Error during processing:", error);
+    if (browser) await browser.close();
+    process.exit(1);
+  }
+};
+
+process.on("SIGINT", async () => {
+  console.log("Received SIGINT. Shutting down gracefully...");
+  shouldStop = true;
+  if (browser) await browser.close();
+  process.exit(0);
+});
+
+scrapeMultipleUrls();
