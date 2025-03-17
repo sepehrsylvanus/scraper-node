@@ -62,10 +62,57 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
 
   let allProductUrls = new Set();
   let currentPage = 1;
+  const maxRetriesPerPage = 3; // Maximum retries per page if products are missing
 
-  while (!shouldStop) {
+  while (
+    !shouldStop &&
+    (totalProducts === 0 ||
+      allProductUrls.size + processedUrls.size < totalProducts)
+  ) {
     console.log(`Scraping page ${currentPage}...`);
-    const currentUrls = await extractProductUrls(page);
+    let retries = 0;
+    let currentUrls = [];
+
+    // Retry logic for each page
+    while (retries < maxRetriesPerPage) {
+      try {
+        currentUrls = await extractProductUrls(page);
+        const expectedPerPage = Math.min(
+          28,
+          totalProducts - allProductUrls.size - processedUrls.size
+        ); // Assuming ~28 products per page
+        if (currentUrls.length >= expectedPerPage || currentUrls.length === 0) {
+          console.log(
+            `Found ${currentUrls.length} products on page ${currentPage}, proceeding...`
+          );
+          break; // Exit retry loop if enough products are found or no products are found
+        }
+        console.log(
+          `Only ${
+            currentUrls.length
+          }/${expectedPerPage} products found on page ${currentPage}. Retrying (${
+            retries + 1
+          }/${maxRetriesPerPage})...`
+        );
+        retries++;
+        await page.reload({ waitUntil: "networkidle2" });
+        await delay(5000); // Longer delay after refresh to ensure content loads
+      } catch (error) {
+        console.error(
+          `Error extracting URLs on page ${currentPage}, retry ${retries + 1}:`,
+          error.message
+        );
+        retries++;
+        if (retries === maxRetriesPerPage) {
+          console.log(
+            `Max retries reached for page ${currentPage}. Moving forward with collected URLs.`
+          );
+          break;
+        }
+        await delay(5000);
+      }
+    }
+
     currentUrls.forEach((url) => {
       const absoluteUrl = url.startsWith("http")
         ? url
@@ -97,6 +144,20 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
 
     if (!hasNextPage) {
       console.log(`No next page available after page ${currentPage}.`);
+      if (
+        totalProducts > 0 &&
+        allProductUrls.size + processedUrls.size < totalProducts
+      ) {
+        console.log(
+          `Missing products (${
+            allProductUrls.size + processedUrls.size
+          }/${totalProducts}). Restarting from page 1...`
+        );
+        currentPage = 1; // Restart from the beginning if products are missing
+        await page.goto(baseUrl, { waitUntil: "networkidle2" });
+        await delay(3000);
+        continue;
+      }
       break;
     }
 
@@ -108,10 +169,17 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
       await delay(3000);
       currentPage = nextPage;
     } catch (error) {
-      console.log(
-        `Reached the end or failed to navigate to ${nextUrl}:`,
-        error.message
-      );
+      console.log(`Failed to navigate to ${nextUrl}:`, error.message);
+      if (
+        totalProducts > 0 &&
+        allProductUrls.size + processedUrls.size < totalProducts
+      ) {
+        console.log(`Missing products. Restarting from page 1...`);
+        currentPage = 1;
+        await page.goto(baseUrl, { waitUntil: "networkidle2" });
+        await delay(3000);
+        continue;
+      }
       break;
     }
   }
