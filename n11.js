@@ -1,4 +1,5 @@
-const puppeteer = require("puppeteer");
+const axios = require("axios");
+const cheerio = require("cheerio");
 const fs = require("fs");
 const path = require("path");
 
@@ -7,7 +8,6 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir);
 }
 
-let browser;
 let shouldStop = false;
 
 const today = new Date("2025-03-10");
@@ -19,40 +19,33 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
 // Utility to delay execution
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Launch browser with retry logic
-const launchBrowser = async (retries = 3) => {
-  for (let i = 0; i < retries; i++) {
-    try {
-      if (browser && browser.isConnected()) return browser;
-      browser = await puppeteer.launch({
-        headless: false,
-        protocolTimeout: 86400000,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      });
-      return browser;
-    } catch (error) {
-      console.error(`Browser launch attempt ${i + 1} failed:`, error);
-      if (i === retries - 1) throw error;
-      await delay(2000);
-    }
-  }
-};
+// HTTP client setup
+const httpClient = axios.create({
+  headers: {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+  },
+  timeout: 60000,
+});
 
-// Extract product URLs from a page
-const extractProductUrls = async (page) => {
-  return await page.evaluate(() => {
-    const productElements = document.querySelectorAll(".columnContent");
-    return Array.from(productElements)
-      .map((element) => {
-        const linkElement = element.querySelector(".pro a[href]");
-        return linkElement ? linkElement.getAttribute("href") : null;
-      })
-      .filter((url) => url && !url.includes("javascript:"));
+// Extract product URLs from HTML
+const extractProductUrls = (html, baseUrl) => {
+  const $ = cheerio.load(html);
+  const productUrls = new Set();
+  $(".columnContent").each((_, element) => {
+    const href = $(element).find(".pro a[href]").attr("href");
+    if (href && !href.includes("javascript:")) {
+      const absoluteUrl = href.startsWith("http")
+        ? href
+        : new URL(href, baseUrl).href;
+      productUrls.add(absoluteUrl);
+    }
   });
+  return Array.from(productUrls);
 };
 
 // Scrape products page by page
-const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
+const scrapePageByPage = async (baseUrl, processedUrls = new Set()) => {
   console.log(`Starting scrape for: ${baseUrl}`);
   let allProductUrls = new Set();
   let currentPage = 1;
@@ -63,29 +56,24 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
     console.log(`Scraping page ${currentPage}: ${pageUrl}`);
 
     try {
-      await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 60000 });
-      await delay(5000); // Increased delay to avoid rate limiting
+      const response = await httpClient.get(pageUrl);
+      const $ = cheerio.load(response.data);
 
-      // Get total products if not already set
+      // Get total products on first page
       if (currentPage === 1) {
-        totalProducts = await page.evaluate(() => {
-          const resultElement = document.querySelector(
-            ".listOptionHolder .resultText strong"
-          );
-          return resultElement
-            ? parseInt(resultElement.textContent.replace(/[^0-9-]/g, ""), 10) ||
-                0
-            : 0;
-        });
+        totalProducts =
+          parseInt(
+            $(".listOptionHolder .resultText strong")
+              .text()
+              .replace(/[^0-9-]/g, ""),
+            10
+          ) || 0;
         console.log(`Total products expected: ${totalProducts}`);
       }
 
-      const currentUrls = await extractProductUrls(page);
+      const currentUrls = extractProductUrls(response.data, baseUrl);
       currentUrls.forEach((url) => {
-        const absoluteUrl = url.startsWith("http")
-          ? url
-          : new URL(url, baseUrl).href;
-        if (!processedUrls.has(absoluteUrl)) allProductUrls.add(absoluteUrl);
+        if (!processedUrls.has(url)) allProductUrls.add(url);
       });
       console.log(
         `Page ${currentPage}: Found ${currentUrls.length} URLs, Unique new: ${allProductUrls.size}`
@@ -99,19 +87,14 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
         break;
       }
 
-      const hasNextPage = await page.evaluate(() => {
-        const nextButton = document.querySelector(
-          ".pagination a.next:not(.disabled)"
-        );
-        return !!nextButton;
-      });
-
+      const hasNextPage = $(".pagination a.next:not(.disabled)").length > 0;
       if (!hasNextPage) {
         console.log(`No next page found after page ${currentPage}.`);
         break;
       }
 
       currentPage++;
+      await delay(5000); // Rate limiting
     } catch (error) {
       console.error(`Error on page ${currentPage}:`, error.message);
       break;
@@ -121,103 +104,75 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
   return { productUrls: Array.from(allProductUrls), totalProducts };
 };
 
-// Scrape individual product details with retries
-const scrapeProductDetails = async (page, url, retries = 3) => {
+// Scrape individual product details
+const scrapeProductDetails = async (url, retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       console.log(`Scraping product: ${url}`);
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-      await delay(3000);
+      const response = await httpClient.get(url);
+      const $ = cheerio.load(response.data);
 
-      const details = await page.evaluate((pageUrl) => {
-        const title =
-          document.querySelector(".unf-p-title .proName")?.textContent.trim() ||
-          null;
-        let brand = null;
-        document.querySelectorAll(".unf-prop-list-item").forEach((item) => {
-          if (
-            item.querySelector(".unf-prop-list-title")?.textContent.trim() ===
-            "Marka"
-          ) {
-            brand =
-              item.querySelector(".unf-prop-list-prop")?.textContent.trim() ||
-              null;
-          }
-        });
+      const title = $(".unf-p-title .proName").text().trim() || null;
+      let brand = null;
+      $(".unf-prop-list-item").each((_, item) => {
+        if ($(".unf-prop-list-title", item).text().trim() === "Marka") {
+          brand = $(".unf-prop-list-prop", item).text().trim() || null;
+        }
+      });
 
-        const priceElement = document.querySelector(".newPrice ins");
-        const price = priceElement?.getAttribute("content")
-          ? parseFloat(priceElement.getAttribute("content"))
-          : null;
-        const currency =
-          priceElement?.querySelector("span")?.getAttribute("content") ||
-          priceElement?.querySelector("span")?.textContent.trim() ||
-          null;
+      const priceElement = $(".newPrice ins");
+      const price = priceElement.attr("content")
+        ? parseFloat(priceElement.attr("content"))
+        : null;
+      const currency =
+        priceElement.find("span").attr("content") ||
+        priceElement.find("span").text().trim() ||
+        null;
 
-        const imageUrls = Array.from(
-          document.querySelectorAll(".unf-p-thumbs .unf-p-thumbs-item img")
-        )
-          .map((img) => img.getAttribute("src"))
-          .filter((src) => src);
-        const images = imageUrls.length ? imageUrls.join(";") : null;
+      const images =
+        $(".unf-p-thumbs .unf-p-thumbs-item img")
+          .map((_, img) => $(img).attr("src"))
+          .get()
+          .filter((src) => src)
+          .join(";") || null;
 
-        const rating = document
-          .querySelector(".ratingCont .ratingScore")
-          ?.textContent.trim()
-          ? parseFloat(
-              document
-                .querySelector(".ratingCont .ratingScore")
-                .textContent.trim()
-            )
-          : null;
-        const shippingFee = document
-          .querySelector(".shipping-fee, .delivery-cost")
-          ?.textContent.replace(/[^\d.]/g, "")
-          ? parseFloat(
-              document
-                .querySelector(".shipping-fee, .delivery-cost")
-                .textContent.replace(/[^\d.]/g, "")
-            )
-          : null;
-        const description =
-          document.querySelector(".unf-info-desc")?.textContent.trim() || null;
+      const rating =
+        parseFloat($(".ratingCont .ratingScore").text().trim()) || null;
+      const shippingFee =
+        parseFloat(
+          $(".shipping-fee, .delivery-cost")
+            .text()
+            .replace(/[^\d.]/g, "")
+        ) || null;
+      const description = $(".unf-info-desc").text().trim() || null;
 
-        const specifications = Array.from(
-          document.querySelectorAll(".unf-prop-list-item")
-        )
-          .map((item) => ({
-            name: item
-              .querySelector(".unf-prop-list-title")
-              ?.textContent.trim(),
-            value: item
-              .querySelector(".unf-prop-list-prop")
-              ?.textContent.trim(),
-          }))
-          .filter((spec) => spec.name && spec.value);
+      const specifications = $(".unf-prop-list-item")
+        .map((_, item) => ({
+          name: $(".unf-prop-list-title", item).text().trim(),
+          value: $(".unf-prop-list-prop", item).text().trim(),
+        }))
+        .get()
+        .filter((spec) => spec.name && spec.value);
 
-        const categories =
-          document
-            .querySelector(".breadcrumb, .breadcrumbs")
-            ?.textContent.trim()
-            .replace(/\s+/g, ">") || null;
-        const productId = pageUrl.match(/-(\d+)(?:[?/#]|$)/)?.[1] || null;
+      const categories =
+        $(".breadcrumb, .breadcrumbs").text().trim().replace(/\s+/g, ">") ||
+        null;
+      const productId = url.match(/-(\d+)(?:[?/#]|$)/)?.[1] || null;
 
-        return {
-          title,
-          brand,
-          price,
-          currency,
-          images,
-          rating,
-          shipping_fee: shippingFee,
-          description,
-          specifications,
-          categories,
-          productId,
-        };
-      }, url);
-
-      return { url, ...details };
+      return {
+        url,
+        title,
+        brand,
+        price,
+        currency,
+        images,
+        rating,
+        shipping_fee: shippingFee,
+        description,
+        specifications,
+        categories,
+        productId,
+      };
     } catch (error) {
       console.error(`Attempt ${i + 1} failed for ${url}:`, error.message);
       if (i === retries - 1) {
@@ -281,7 +236,6 @@ const scrapeMultipleUrls = async () => {
   }
 
   try {
-    await launchBrowser();
     const n11Dir = path.join(outputDir, "n11");
     if (!fs.existsSync(n11Dir)) fs.mkdirSync(n11Dir, { recursive: true });
 
@@ -302,19 +256,10 @@ const scrapeMultipleUrls = async () => {
       );
       saveProductsToFile(productsArray, outputFileName);
 
-      const mainPage = await browser.newPage();
-      await mainPage.setViewport({ width: 1366, height: 768 });
-      await mainPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
-
       const { productUrls, totalProducts } = await scrapePageByPage(
-        mainPage,
         baseUrl,
         processedUrls
       );
-      await mainPage.close();
-
       console.log(
         `Found ${productUrls.length} new product URLs out of ${totalProducts}`
       );
@@ -326,20 +271,13 @@ const scrapeMultipleUrls = async () => {
           continue;
         }
 
-        const productPage = await browser.newPage();
-        try {
-          const details = await scrapeProductDetails(productPage, productUrl);
-          productsArray.push(details);
-          processedUrls.add(productUrl);
-          saveProductsToFile(productsArray, outputFileName);
-          console.log(
-            `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
-          );
-        } catch (error) {
-          console.error(`Failed to scrape ${productUrl}:`, error);
-        } finally {
-          await productPage.close();
-        }
+        const details = await scrapeProductDetails(productUrl);
+        productsArray.push(details);
+        processedUrls.add(productUrl);
+        saveProductsToFile(productsArray, outputFileName);
+        console.log(
+          `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
+        );
         await delay(2000); // Rate limiting
       }
 
@@ -347,28 +285,20 @@ const scrapeMultipleUrls = async () => {
         console.log(
           `Retrying: ${processedUrls.size}/${totalProducts} collected`
         );
-        const retryPage = await browser.newPage();
         const { productUrls: newUrls } = await scrapePageByPage(
-          retryPage,
           baseUrl,
           processedUrls
         );
-        await retryPage.close();
 
         for (const productUrl of newUrls) {
           if (processedUrls.has(productUrl)) continue;
-          const productPage = await browser.newPage();
-          try {
-            const details = await scrapeProductDetails(productPage, productUrl);
-            productsArray.push(details);
-            processedUrls.add(productUrl);
-            saveProductsToFile(productsArray, outputFileName);
-            console.log(
-              `Retry Progress: ${productsArray.length}/${totalProducts}`
-            );
-          } finally {
-            await productPage.close();
-          }
+          const details = await scrapeProductDetails(productUrl);
+          productsArray.push(details);
+          processedUrls.add(productUrl);
+          saveProductsToFile(productsArray, outputFileName);
+          console.log(
+            `Retry Progress: ${productsArray.length}/${totalProducts}`
+          );
           await delay(2000);
         }
       }
@@ -378,20 +308,17 @@ const scrapeMultipleUrls = async () => {
       );
     }
 
-    await browser.close();
     console.log("All URLs processed.");
     process.exit(0);
   } catch (error) {
     console.error("Fatal error:", error);
-    if (browser) await browser.close();
     process.exit(1);
   }
 };
 
-process.on("SIGINT", async () => {
+process.on("SIGINT", () => {
   console.log("Shutting down...");
   shouldStop = true;
-  if (browser) await browser.close();
   process.exit(0);
 });
 
