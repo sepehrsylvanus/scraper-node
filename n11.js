@@ -1,4 +1,4 @@
-const axios = require("axios");
+const puppeteer = require("puppeteer");
 const cheerio = require("cheerio");
 const fs = require("fs");
 const path = require("path");
@@ -8,6 +8,7 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir);
 }
 
+let browser;
 let shouldStop = false;
 
 const today = new Date("2025-03-10");
@@ -19,33 +20,42 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
 // Utility to delay execution
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// HTTP client setup
-const httpClient = axios.create({
-  headers: {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-  },
-  timeout: 60000,
-});
+// Launch browser with retry logic
+const launchBrowser = async (retries = 3) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      if (browser && browser.isConnected()) return browser;
+      browser = await puppeteer.launch({
+        headless: true, // Headless mode for server
+        protocolTimeout: 86400000,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      });
+      return browser;
+    } catch (error) {
+      console.error(`Browser launch attempt ${i + 1} failed:`, error);
+      if (i === retries - 1) throw error;
+      await delay(2000);
+    }
+  }
+};
 
-// Extract product URLs from HTML
+// Extract product URLs from a page using Cheerio
 const extractProductUrls = (html, baseUrl) => {
   const $ = cheerio.load(html);
-  const productUrls = new Set();
-  $(".columnContent").each((_, element) => {
-    const href = $(element).find(".pro a[href]").attr("href");
-    if (href && !href.includes("javascript:")) {
-      const absoluteUrl = href.startsWith("http")
-        ? href
-        : new URL(href, baseUrl).href;
-      productUrls.add(absoluteUrl);
-    }
-  });
-  return Array.from(productUrls);
+  const productElements = $(".columnContent");
+  return productElements
+    .map((i, element) => {
+      const linkElement = $(element).find(".pro a[href]");
+      const href = linkElement.attr("href");
+      return href && !href.includes("javascript:") ? href : null;
+    })
+    .get()
+    .filter(Boolean)
+    .map((url) => (url.startsWith("http") ? url : new URL(url, baseUrl).href));
 };
 
 // Scrape products page by page
-const scrapePageByPage = async (baseUrl, processedUrls = new Set()) => {
+const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
   console.log(`Starting scrape for: ${baseUrl}`);
   let allProductUrls = new Set();
   let currentPage = 1;
@@ -56,22 +66,22 @@ const scrapePageByPage = async (baseUrl, processedUrls = new Set()) => {
     console.log(`Scraping page ${currentPage}: ${pageUrl}`);
 
     try {
-      const response = await httpClient.get(pageUrl);
-      const $ = cheerio.load(response.data);
+      await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 60000 });
+      await delay(5000); // Increased delay to avoid rate limiting
 
-      // Get total products on first page
+      const html = await page.content();
+      const $ = cheerio.load(html);
+
+      // Get total products if not already set
       if (currentPage === 1) {
-        totalProducts =
-          parseInt(
-            $(".listOptionHolder .resultText strong")
-              .text()
-              .replace(/[^0-9-]/g, ""),
-            10
-          ) || 0;
+        const resultText = $(".listOptionHolder .resultText strong").text();
+        totalProducts = resultText
+          ? parseInt(resultText.replace(/[^0-9-]/g, ""), 10) || 0
+          : 0;
         console.log(`Total products expected: ${totalProducts}`);
       }
 
-      const currentUrls = extractProductUrls(response.data, baseUrl);
+      const currentUrls = extractProductUrls(html, baseUrl);
       currentUrls.forEach((url) => {
         if (!processedUrls.has(url)) allProductUrls.add(url);
       });
@@ -94,7 +104,6 @@ const scrapePageByPage = async (baseUrl, processedUrls = new Set()) => {
       }
 
       currentPage++;
-      await delay(5000); // Rate limiting
     } catch (error) {
       console.error(`Error on page ${currentPage}:`, error.message);
       break;
@@ -104,19 +113,22 @@ const scrapePageByPage = async (baseUrl, processedUrls = new Set()) => {
   return { productUrls: Array.from(allProductUrls), totalProducts };
 };
 
-// Scrape individual product details
-const scrapeProductDetails = async (url, retries = 3) => {
+// Scrape individual product details with retries using Cheerio
+const scrapeProductDetails = async (page, url, retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       console.log(`Scraping product: ${url}`);
-      const response = await httpClient.get(url);
-      const $ = cheerio.load(response.data);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+      await delay(3000);
+
+      const html = await page.content();
+      const $ = cheerio.load(html);
 
       const title = $(".unf-p-title .proName").text().trim() || null;
       let brand = null;
-      $(".unf-prop-list-item").each((_, item) => {
-        if ($(".unf-prop-list-title", item).text().trim() === "Marka") {
-          brand = $(".unf-prop-list-prop", item).text().trim() || null;
+      $(".unf-prop-list-item").each((i, item) => {
+        if ($(item).find(".unf-prop-list-title").text().trim() === "Marka") {
+          brand = $(item).find(".unf-prop-list-prop").text().trim() || null;
         }
       });
 
@@ -129,27 +141,30 @@ const scrapeProductDetails = async (url, retries = 3) => {
         priceElement.find("span").text().trim() ||
         null;
 
-      const images =
-        $(".unf-p-thumbs .unf-p-thumbs-item img")
-          .map((_, img) => $(img).attr("src"))
-          .get()
-          .filter((src) => src)
-          .join(";") || null;
+      const imageUrls = $(".unf-p-thumbs .unf-p-thumbs-item img")
+        .map((i, img) => $(img).attr("src"))
+        .get()
+        .filter(Boolean);
+      const images = imageUrls.length ? imageUrls.join(";") : null;
 
-      const rating =
-        parseFloat($(".ratingCont .ratingScore").text().trim()) || null;
-      const shippingFee =
-        parseFloat(
-          $(".shipping-fee, .delivery-cost")
-            .text()
-            .replace(/[^\d.]/g, "")
-        ) || null;
+      const rating = $(".ratingCont .ratingScore").text().trim()
+        ? parseFloat($(".ratingCont .ratingScore").text().trim())
+        : null;
+      const shippingFee = $(".shipping-fee, .delivery-cost")
+        .text()
+        .replace(/[^\d.]/g, "")
+        ? parseFloat(
+            $(".shipping-fee, .delivery-cost")
+              .text()
+              .replace(/[^\d.]/g, "")
+          )
+        : null;
       const description = $(".unf-info-desc").text().trim() || null;
 
       const specifications = $(".unf-prop-list-item")
-        .map((_, item) => ({
-          name: $(".unf-prop-list-title", item).text().trim(),
-          value: $(".unf-prop-list-prop", item).text().trim(),
+        .map((i, item) => ({
+          name: $(item).find(".unf-prop-list-title").text().trim(),
+          value: $(item).find(".unf-prop-list-prop").text().trim(),
         }))
         .get()
         .filter((spec) => spec.name && spec.value);
@@ -236,6 +251,7 @@ const scrapeMultipleUrls = async () => {
   }
 
   try {
+    await launchBrowser();
     const n11Dir = path.join(outputDir, "n11");
     if (!fs.existsSync(n11Dir)) fs.mkdirSync(n11Dir, { recursive: true });
 
@@ -256,10 +272,18 @@ const scrapeMultipleUrls = async () => {
       );
       saveProductsToFile(productsArray, outputFileName);
 
+      const mainPage = await browser.newPage();
+      await mainPage.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+      );
+
       const { productUrls, totalProducts } = await scrapePageByPage(
+        mainPage,
         baseUrl,
         processedUrls
       );
+      await mainPage.close();
+
       console.log(
         `Found ${productUrls.length} new product URLs out of ${totalProducts}`
       );
@@ -271,13 +295,20 @@ const scrapeMultipleUrls = async () => {
           continue;
         }
 
-        const details = await scrapeProductDetails(productUrl);
-        productsArray.push(details);
-        processedUrls.add(productUrl);
-        saveProductsToFile(productsArray, outputFileName);
-        console.log(
-          `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
-        );
+        const productPage = await browser.newPage();
+        try {
+          const details = await scrapeProductDetails(productPage, productUrl);
+          productsArray.push(details);
+          processedUrls.add(productUrl);
+          saveProductsToFile(productsArray, outputFileName);
+          console.log(
+            `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
+          );
+        } catch (error) {
+          console.error(`Failed to scrape ${productUrl}:`, error);
+        } finally {
+          await productPage.close();
+        }
         await delay(2000); // Rate limiting
       }
 
@@ -285,20 +316,28 @@ const scrapeMultipleUrls = async () => {
         console.log(
           `Retrying: ${processedUrls.size}/${totalProducts} collected`
         );
+        const retryPage = await browser.newPage();
         const { productUrls: newUrls } = await scrapePageByPage(
+          retryPage,
           baseUrl,
           processedUrls
         );
+        await retryPage.close();
 
         for (const productUrl of newUrls) {
           if (processedUrls.has(productUrl)) continue;
-          const details = await scrapeProductDetails(productUrl);
-          productsArray.push(details);
-          processedUrls.add(productUrl);
-          saveProductsToFile(productsArray, outputFileName);
-          console.log(
-            `Retry Progress: ${productsArray.length}/${totalProducts}`
-          );
+          const productPage = await browser.newPage();
+          try {
+            const details = await scrapeProductDetails(productPage, productUrl);
+            productsArray.push(details);
+            processedUrls.add(productUrl);
+            saveProductsToFile(productsArray, outputFileName);
+            console.log(
+              `Retry Progress: ${productsArray.length}/${totalProducts}`
+            );
+          } finally {
+            await productPage.close();
+          }
           await delay(2000);
         }
       }
@@ -308,17 +347,20 @@ const scrapeMultipleUrls = async () => {
       );
     }
 
+    await browser.close();
     console.log("All URLs processed.");
     process.exit(0);
   } catch (error) {
     console.error("Fatal error:", error);
+    if (browser) await browser.close();
     process.exit(1);
   }
 };
 
-process.on("SIGINT", () => {
+process.on("SIGINT", async () => {
   console.log("Shutting down...");
   shouldStop = true;
+  if (browser) await browser.close();
   process.exit(0);
 });
 
