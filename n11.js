@@ -343,7 +343,7 @@ const scrapeMultipleUrls = async () => {
         await delay(2000); // Rate limiting
       }
 
-      while (totalProducts > 0 && processedUrls.size < totalProducts) {
+      while (totalProducts > 0 && processedUrls.size < totalProducts - 1) {
         console.log(
           `Retrying: ${processedUrls.size}/${totalProducts} collected`
         );
