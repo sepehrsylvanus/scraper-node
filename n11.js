@@ -2,7 +2,18 @@ const puppeteer = require("puppeteer");
 const cheerio = require("cheerio");
 const fs = require("fs");
 const path = require("path");
-
+const { default: axios } = require("axios");
+const port = 33335;
+const session_id = (1000000 * Math.random()) | 0;
+const options = {
+  auth: {
+    username: `brd-customer-hl_7930d613-zone-davutbey-session-${session_id}`,
+    password: "3wa371vuwi2e",
+  },
+  host: "brd.superproxy.io",
+  port,
+  rejectUnauthorized: false,
+};
 const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir);
@@ -117,12 +128,13 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
 const scrapeProductDetails = async (page, url, retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
+      const response = await axios.get(url, options);
       console.log(`Scraping product: ${url}`);
       await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
       await delay(3000);
 
       const html = await page.content();
-      const $ = cheerio.load(html);
+      const $ = cheerio.load(response.data);
 
       const title = $(".unf-p-title .proName").text().trim() || null;
       let brand = null;
