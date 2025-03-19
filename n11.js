@@ -66,7 +66,6 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
       await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 60000 });
       await delay(5000); // Increased delay to avoid rate limiting
 
-      // Get total products if not already set
       if (currentPage === 1) {
         totalProducts = await page.evaluate(() => {
           const resultElement = document.querySelector(
@@ -272,7 +271,7 @@ const loadExistingProducts = (baseUrl, dir) => {
   return existingProducts;
 };
 
-// Main scraping function
+// Main scraping function with batching
 const scrapeMultipleUrls = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
@@ -281,14 +280,14 @@ const scrapeMultipleUrls = async () => {
   }
 
   try {
-    await launchBrowser();
     const n11Dir = path.join(outputDir, "n11");
     if (!fs.existsSync(n11Dir)) fs.mkdirSync(n11Dir, { recursive: true });
 
     for (const baseUrl of urls) {
       console.log(`\nProcessing: ${baseUrl}`);
-      const processedUrls = loadExistingProducts(baseUrl, n11Dir);
-      const productsArray = [];
+      let processedUrls = loadExistingProducts(baseUrl, n11Dir);
+      let productsArray = [];
+      let totalProductsProcessed = processedUrls.size;
 
       const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
       const timestamp = new Date()
@@ -302,83 +301,120 @@ const scrapeMultipleUrls = async () => {
       );
       saveProductsToFile(productsArray, outputFileName);
 
-      const mainPage = await browser.newPage();
-      await mainPage.setViewport({ width: 1366, height: 768 });
-      await mainPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
-
-      const { productUrls, totalProducts } = await scrapePageByPage(
-        mainPage,
-        baseUrl,
-        processedUrls
-      );
-      await mainPage.close();
-
-      console.log(
-        `Found ${productUrls.length} new product URLs out of ${totalProducts}`
-      );
-
-      for (let i = 0; i < productUrls.length; i++) {
-        const productUrl = productUrls[i];
-        if (processedUrls.has(productUrl)) {
-          console.log(`Skipping processed URL: ${productUrl}`);
-          continue;
-        }
-
-        const productPage = await browser.newPage();
-        try {
-          const details = await scrapeProductDetails(productPage, productUrl);
-          productsArray.push(details);
-          processedUrls.add(productUrl);
-          saveProductsToFile(productsArray, outputFileName);
-          console.log(
-            `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
-          );
-        } catch (error) {
-          console.error(`Failed to scrape ${productUrl}:`, error);
-        } finally {
-          await productPage.close();
-        }
-        await delay(2000); // Rate limiting
-      }
-
-      while (totalProducts > 0 && processedUrls.size < totalProducts - 1) {
-        console.log(
-          `Retrying: ${processedUrls.size}/${totalProducts} collected`
+      while (true) {
+        // Infinite loop for restarting after 1000 products
+        await launchBrowser(); // Launch browser for each cycle
+        const mainPage = await browser.newPage();
+        await mainPage.setViewport({ width: 1366, height: 768 });
+        await mainPage.setUserAgent(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         );
-        const retryPage = await browser.newPage();
-        const { productUrls: newUrls } = await scrapePageByPage(
-          retryPage,
+
+        const { productUrls, totalProducts } = await scrapePageByPage(
+          mainPage,
           baseUrl,
           processedUrls
         );
-        await retryPage.close();
+        await mainPage.close();
 
-        for (const productUrl of newUrls) {
-          if (processedUrls.has(productUrl)) continue;
+        console.log(
+          `Found ${productUrls.length} new product URLs out of ${totalProducts}`
+        );
+
+        for (let i = 0; i < productUrls.length; i++) {
+          const productUrl = productUrls[i];
+          if (processedUrls.has(productUrl)) {
+            console.log(`Skipping processed URL: ${productUrl}`);
+            continue;
+          }
+
           const productPage = await browser.newPage();
           try {
             const details = await scrapeProductDetails(productPage, productUrl);
             productsArray.push(details);
             processedUrls.add(productUrl);
+            totalProductsProcessed++;
             saveProductsToFile(productsArray, outputFileName);
             console.log(
-              `Retry Progress: ${productsArray.length}/${totalProducts}`
+              `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
             );
+          } catch (error) {
+            console.error(`Failed to scrape ${productUrl}:`, error);
           } finally {
             await productPage.close();
           }
-          await delay(2000);
-        }
-      }
+          await delay(2000); // Rate limiting
 
-      console.log(
-        `Completed ${baseUrl}: ${processedUrls.size}/${totalProducts} products saved to ${outputFileName}`
-      );
+          // Check if 1000 products have been processed in this batch
+          if (productsArray.length >= 1000) {
+            console.log(`Reached 1000 products. Restarting process...`);
+            await browser.close();
+            saveProductsToFile(productsArray, outputFileName); // Save current batch
+            productsArray = []; // Reset for next batch
+            break; // Exit loop to restart
+          }
+        }
+
+        // Retry logic for remaining products
+        while (totalProducts > 0 && processedUrls.size < totalProducts) {
+          console.log(
+            `Retrying: ${processedUrls.size}/${totalProducts} collected`
+          );
+          const retryPage = await browser.newPage();
+          const { productUrls: newUrls } = await scrapePageByPage(
+            retryPage,
+            baseUrl,
+            processedUrls
+          );
+          await retryPage.close();
+
+          for (const productUrl of newUrls) {
+            if (processedUrls.has(productUrl)) continue;
+            const productPage = await browser.newPage();
+            try {
+              const details = await scrapeProductDetails(
+                productPage,
+                productUrl
+              );
+              productsArray.push(details);
+              processedUrls.add(productUrl);
+              totalProductsProcessed++;
+              saveProductsToFile(productsArray, outputFileName);
+              console.log(
+                `Retry Progress: ${productsArray.length}/${totalProducts}`
+              );
+            } finally {
+              await productPage.close();
+            }
+            await delay(2000);
+
+            // Check if 1000 products have been processed in this batch
+            if (productsArray.length >= 1000) {
+              console.log(`Reached 1000 products. Restarting process...`);
+              await browser.close();
+              saveProductsToFile(productsArray, outputFileName); // Save current batch
+              productsArray = []; // Reset for next batch
+              break; // Exit retry loop to restart
+            }
+          }
+          if (productsArray.length >= 1000) break; // Ensure we break out of retry loop
+        }
+
+        // Exit condition: all products scraped or no new URLs
+        if (processedUrls.size >= totalProducts || productUrls.length === 0) {
+          console.log(
+            `Completed ${baseUrl}: ${processedUrls.size}/${totalProducts} products saved to ${outputFileName}`
+          );
+          await browser.close();
+          break; // Exit the infinite while loop
+        }
+
+        // Restart for next batch
+        await browser.close();
+        console.log(`Restarting for next batch...`);
+      }
     }
 
-    await browser.close();
     console.log("All URLs processed.");
     process.exit(0);
   } catch (error) {
@@ -388,6 +424,7 @@ const scrapeMultipleUrls = async () => {
   }
 };
 
+// Handle graceful shutdown
 process.on("SIGINT", async () => {
   console.log("Shutting down...");
   shouldStop = true;
@@ -395,4 +432,5 @@ process.on("SIGINT", async () => {
   process.exit(0);
 });
 
+// Start the scraping process
 scrapeMultipleUrls();
