@@ -31,8 +31,8 @@ const launchBrowser = async (retries = 3) => {
       if (browser && browser.isConnected()) return browser;
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false,
-        protocolTimeout: 86400000,
+        headless: false, // Set to true for production if needed
+        protocolTimeout: 86400000, // 24-hour timeout
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       });
       return browser;
@@ -53,10 +53,10 @@ const extractProductUrls = async (page, baseUrl) => {
     const descElement = document.querySelector(".dscrptn.dscrptn-V2 h2");
     if (descElement) {
       const text = descElement.textContent.trim();
-      const match = text.match(/([\d.]+)(\+)?\s+sonuç/); // Updated regex
+      const match = text.match(/([\d.]+)(\+)?\s+sonuç/);
       if (match) {
         const number = parseFloat(match[1].replace(".", ""));
-        return { count: number, isPlus: !!match[2] }; // Track if it's "100.000+"
+        return { count: number, isPlus: !!match[2] };
       }
     }
     return { count: 0, isPlus: false };
@@ -70,10 +70,12 @@ const extractProductUrls = async (page, baseUrl) => {
   );
 
   let allProductUrls = new Set();
-  let scrollPosition = 0;
-  let previousUrlCount = 0;
+  let previousHeight = 0;
+  let stagnantCount = 0;
+  const maxStagnantAttempts = 5; // Stop if no new content after 5 attempts
 
   while (!shouldStop) {
+    // Extract current product URLs
     const currentUrls = await page.evaluate(() => {
       const productElements = document.querySelectorAll(
         ".p-card-chldrn-cntnr.card-border a"
@@ -83,6 +85,7 @@ const extractProductUrls = async (page, baseUrl) => {
         .filter((url) => url && !url.includes("javascript:"));
     });
 
+    const previousSize = allProductUrls.size;
     currentUrls.forEach((url) => {
       const absoluteUrl = url.startsWith("http")
         ? url
@@ -95,7 +98,7 @@ const extractProductUrls = async (page, baseUrl) => {
       `Found ${allProductUrls.size} unique URLs so far...`
     );
 
-    // If total is known and we've collected enough, stop
+    // If we have a known total and collected enough, stop
     if (!isIndeterminate && allProductUrls.size >= totalProducts) {
       logProgress(
         "URL_COLLECTION",
@@ -104,26 +107,41 @@ const extractProductUrls = async (page, baseUrl) => {
       break;
     }
 
-    // If total is indeterminate (e.g., "100.000+"), stop when no new URLs are found
-    if (isIndeterminate && allProductUrls.size === previousUrlCount) {
+    // Scroll down and wait for content to load
+    await page.evaluate(() => window.scrollBy(0, 1000)); // Larger scroll increment
+    await delay(2000); // Increased delay to allow content to load
+
+    const currentHeight = await page.evaluate(() => document.body.scrollHeight);
+
+    // Check if we've reached the bottom or no new content is loading
+    if (currentHeight === previousHeight) {
+      stagnantCount++;
       logProgress(
         "URL_COLLECTION",
-        `No new URLs found after scroll. Stopping at ${allProductUrls.size} products.`
+        `No height change detected (attempt ${stagnantCount}/${maxStagnantAttempts})`
       );
-      break;
+      if (stagnantCount >= maxStagnantAttempts) {
+        logProgress(
+          "URL_COLLECTION",
+          `No new content after ${maxStagnantAttempts} attempts. Stopping at ${allProductUrls.size} URLs.`
+        );
+        break;
+      }
+    } else {
+      stagnantCount = 0; // Reset if new content is loaded
     }
 
-    previousUrlCount = allProductUrls.size;
-    scrollPosition += 500;
-    await page.evaluate((pos) => window.scrollTo(0, pos), scrollPosition);
-    await delay(500);
+    previousHeight = currentHeight;
 
-    const reachedBottom = await page.evaluate(() => {
+    // Additional bottom check
+    const atBottom = await page.evaluate(() => {
       return window.scrollY + window.innerHeight >= document.body.scrollHeight;
     });
-
-    if (reachedBottom) {
-      logProgress("URL_COLLECTION", "Reached bottom of page. Stopping scroll.");
+    if (atBottom && allProductUrls.size === previousSize) {
+      logProgress(
+        "URL_COLLECTION",
+        "Reached page bottom with no new URLs. Stopping."
+      );
       break;
     }
   }
@@ -323,7 +341,6 @@ const scrapeMultipleUrls = async () => {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
       );
 
-      productsArray = [];
       for (let i = 0; i < productUrls.length && !shouldStop; i++) {
         if (processedUrls.has(productUrls[i])) {
           logProgress(
@@ -344,7 +361,7 @@ const scrapeMultipleUrls = async () => {
           `Processed ${i + 1}/${productUrls.length} products`
         );
         saveProductsToFile(productsArray, outputFileName);
-        await delay(1000);
+        await delay(1000); // Delay between product scrapes
       }
 
       await detailPage.close();
@@ -369,6 +386,7 @@ const scrapeMultipleUrls = async () => {
 // Handle graceful shutdown
 process.on("SIGINT", async () => {
   shouldStop = true;
+  logProgress("SHUTDOWN", "Received SIGINT. Shutting down gracefully...");
   if (browser) await browser.close();
   process.exit(0);
 });
