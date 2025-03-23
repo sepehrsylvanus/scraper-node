@@ -49,18 +49,29 @@ const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting scrape for: ${baseUrl}`);
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-  const totalProducts = await page.evaluate(() => {
+  const totalProductsInfo = await page.evaluate(() => {
     const descElement = document.querySelector(".dscrptn.dscrptn-V2 h2");
     if (descElement) {
-      const match = descElement.textContent.match(/(\d+)\s+sonuç/);
-      return match ? parseInt(match[1], 10) : 0;
+      const text = descElement.textContent.trim();
+      const match = text.match(/([\d.]+)(\+)?\s+sonuç/); // Updated regex
+      if (match) {
+        const number = parseFloat(match[1].replace(".", ""));
+        return { count: number, isPlus: !!match[2] }; // Track if it's "100.000+"
+      }
     }
-    return 0;
+    return { count: 0, isPlus: false };
   });
-  logProgress("URL_COLLECTION", `Total products expected: ${totalProducts}`);
+
+  const totalProducts = totalProductsInfo.count;
+  const isIndeterminate = totalProductsInfo.isPlus;
+  logProgress(
+    "URL_COLLECTION",
+    `Total products expected: ${totalProducts}${isIndeterminate ? "+" : ""}`
+  );
 
   let allProductUrls = new Set();
   let scrollPosition = 0;
+  let previousUrlCount = 0;
 
   while (!shouldStop) {
     const currentUrls = await page.evaluate(() => {
@@ -84,7 +95,8 @@ const extractProductUrls = async (page, baseUrl) => {
       `Found ${allProductUrls.size} unique URLs so far...`
     );
 
-    if (allProductUrls.size >= totalProducts - 1) {
+    // If total is known and we've collected enough, stop
+    if (!isIndeterminate && allProductUrls.size >= totalProducts) {
       logProgress(
         "URL_COLLECTION",
         `Collected sufficient products (${allProductUrls.size}/${totalProducts}).`
@@ -92,6 +104,16 @@ const extractProductUrls = async (page, baseUrl) => {
       break;
     }
 
+    // If total is indeterminate (e.g., "100.000+"), stop when no new URLs are found
+    if (isIndeterminate && allProductUrls.size === previousUrlCount) {
+      logProgress(
+        "URL_COLLECTION",
+        `No new URLs found after scroll. Stopping at ${allProductUrls.size} products.`
+      );
+      break;
+    }
+
+    previousUrlCount = allProductUrls.size;
     scrollPosition += 500;
     await page.evaluate((pos) => window.scrollTo(0, pos), scrollPosition);
     await delay(500);
@@ -106,7 +128,11 @@ const extractProductUrls = async (page, baseUrl) => {
     }
   }
 
-  return { productUrls: Array.from(allProductUrls), totalProducts };
+  return {
+    productUrls: Array.from(allProductUrls),
+    totalProducts,
+    isIndeterminate,
+  };
 };
 
 // Scrape product details from individual product page
@@ -161,7 +187,6 @@ const scrapeProductDetails = async (page, url) => {
         return { name, value };
       });
 
-      // Fixed categories extraction with deduplication
       const breadcrumbElements = document.querySelectorAll(
         ".product-detail-breadcrumb-item span"
       );
@@ -281,15 +306,15 @@ const scrapeMultipleUrls = async () => {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
       );
 
-      const { productUrls, totalProducts } = await extractProductUrls(
-        mainPage,
-        baseUrl
-      );
+      const { productUrls, totalProducts, isIndeterminate } =
+        await extractProductUrls(mainPage, baseUrl);
       await mainPage.close();
 
       logProgress(
         "MAIN",
-        `Found ${productUrls.length} product URLs out of ${totalProducts}`
+        `Found ${productUrls.length} product URLs out of ${totalProducts}${
+          isIndeterminate ? "+" : ""
+        }`
       );
 
       const detailPage = await browser.newPage();
@@ -326,7 +351,9 @@ const scrapeMultipleUrls = async () => {
 
       logProgress(
         "MAIN",
-        `Completed ${baseUrl}: ${productsArray.length}/${totalProducts} products saved to ${outputFileName}`
+        `Completed ${baseUrl}: ${productsArray.length}/${totalProducts}${
+          isIndeterminate ? "+" : ""
+        } products saved to ${outputFileName}`
       );
     }
 
