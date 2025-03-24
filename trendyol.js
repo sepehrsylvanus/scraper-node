@@ -72,10 +72,9 @@ const extractProductUrls = async (page, baseUrl) => {
   let allProductUrls = new Set();
   let previousHeight = 0;
   let stagnantCount = 0;
-  const maxStagnantAttempts = 5; // Stop if no new content after 5 attempts
+  const maxStagnantAttempts = 5;
 
   while (!shouldStop) {
-    // Extract current product URLs
     const currentUrls = await page.evaluate(() => {
       const productElements = document.querySelectorAll(
         ".p-card-chldrn-cntnr.card-border a"
@@ -98,7 +97,6 @@ const extractProductUrls = async (page, baseUrl) => {
       `Found ${allProductUrls.size} unique URLs so far...`
     );
 
-    // If we have a known total and collected enough, stop
     if (!isIndeterminate && allProductUrls.size >= totalProducts) {
       logProgress(
         "URL_COLLECTION",
@@ -107,13 +105,11 @@ const extractProductUrls = async (page, baseUrl) => {
       break;
     }
 
-    // Scroll down and wait for content to load
-    await page.evaluate(() => window.scrollBy(0, 1000)); // Larger scroll increment
-    await delay(2000); // Increased delay to allow content to load
+    await page.evaluate(() => window.scrollBy(0, 1000));
+    await delay(2000);
 
     const currentHeight = await page.evaluate(() => document.body.scrollHeight);
 
-    // Check if we've reached the bottom or no new content is loading
     if (currentHeight === previousHeight) {
       stagnantCount++;
       logProgress(
@@ -128,12 +124,11 @@ const extractProductUrls = async (page, baseUrl) => {
         break;
       }
     } else {
-      stagnantCount = 0; // Reset if new content is loaded
+      stagnantCount = 0;
     }
 
     previousHeight = currentHeight;
 
-    // Additional bottom check
     const atBottom = await page.evaluate(() => {
       return window.scrollY + window.innerHeight >= document.body.scrollHeight;
     });
@@ -215,6 +210,12 @@ const scrapeProductDetails = async (page, url) => {
       );
       const categories = Array.from(uniqueCategories).join(">");
 
+      // Extract the HTML of the detail-border div
+      const descriptionElement = document.querySelector(".detail-border");
+      const descriptionHtml = descriptionElement
+        ? descriptionElement.outerHTML
+        : null;
+
       return {
         brand,
         title,
@@ -224,6 +225,7 @@ const scrapeProductDetails = async (page, url) => {
         rating,
         specifications,
         categories,
+        descriptionHtml, // New field for the HTML content
       };
     });
 
@@ -241,6 +243,7 @@ const scrapeProductDetails = async (page, url) => {
       rating: productDetails.rating,
       specifications: productDetails.specifications,
       categories: productDetails.categories,
+      descriptionHtml: productDetails.descriptionHtml, // Include in the return object
     };
   } catch (error) {
     console.error(`Error scraping ${url}:`, error.message);
@@ -255,6 +258,7 @@ const scrapeProductDetails = async (page, url) => {
       rating: null,
       specifications: [],
       categories: "",
+      descriptionHtml: null, // Default value on error
     };
   }
 };
@@ -361,7 +365,7 @@ const scrapeMultipleUrls = async () => {
           `Processed ${i + 1}/${productUrls.length} products`
         );
         saveProductsToFile(productsArray, outputFileName);
-        await delay(1000); // Delay between product scrapes
+        await delay(1000);
       }
 
       await detailPage.close();
