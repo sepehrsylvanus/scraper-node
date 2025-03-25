@@ -149,12 +149,64 @@ const extractProductUrls = async (page, baseUrl) => {
 };
 
 // Scrape product details from individual product page
+// Scrape product details from individual product page
 const scrapeProductDetails = async (page, url) => {
   try {
     logProgress("DETAIL", `Scraping details from: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
+    // Optional: Click on the first gallery thumbnail to load full-size images in the modal
+    await page.evaluate(() => {
+      const firstThumbnail = document.querySelector(
+        ".product-slide.thumbnail-feature img"
+      );
+      if (firstThumbnail) {
+        firstThumbnail.click();
+      }
+    });
+    await delay(1000); // Wait for the modal/gallery to load
+
     const productDetails = await page.evaluate(() => {
+      const imageSources = new Set();
+
+      // 1. Main product image (often full-size or close to it)
+      const mainImage = document.querySelector(".base-product-image img");
+      if (mainImage) {
+        let src = mainImage.getAttribute("src");
+        // Replace size parameters in URL (e.g., 800x800 to original or larger)
+        if (src && src.includes("800x800")) {
+          src = src.replace(/(\d+x\d+)/, ""); // Attempt to get original size
+        }
+        if (src) imageSources.add(src);
+      }
+
+      // 2. Gallery modal images (typically full-size)
+      const modalImages = document.querySelectorAll(".gallery-modal img");
+      modalImages.forEach((img) => {
+        let src = img.getAttribute("src");
+        if (src && src.includes("thumbnail")) {
+          src = src.replace("thumbnail", ""); // Remove thumbnail keyword if present
+        }
+        if (src) imageSources.add(src);
+      });
+
+      // 3. Fallback: Slider images with URL transformation
+      const sliderImages = document.querySelectorAll(
+        ".product-slide.thumbnail-feature img"
+      );
+      sliderImages.forEach((img) => {
+        let src = img.getAttribute("src");
+        if (src) {
+          // Trendyol often uses size suffixes like "100x100" or "800x800"
+          src = src.replace(/(\d+x\d+)/, ""); // Attempt to request original size
+          imageSources.add(src);
+        }
+      });
+
+      // Convert Set to string with semicolon separator
+      const images = Array.from(imageSources).join(";");
+
+      // Rest of the existing evaluation logic...
       const brandElement = document.querySelector(
         "span.product-description-market-place"
       );
@@ -174,13 +226,6 @@ const scrapeProductDetails = async (page, url) => {
           currency = priceMatch[2];
         }
       }
-
-      const imageElements = document.querySelectorAll(
-        ".product-slide.thumbnail-feature img"
-      );
-      const images = Array.from(imageElements)
-        .map((img) => img.getAttribute("src"))
-        .join(";");
 
       const ratingElement = document.querySelector(
         ".product-rating-score .value"
@@ -210,7 +255,6 @@ const scrapeProductDetails = async (page, url) => {
       );
       const categories = Array.from(uniqueCategories).join(">");
 
-      // Extract the HTML of the detail-border div
       const descriptionElement = document.querySelector(".detail-border");
       const descriptionHtml = descriptionElement
         ? descriptionElement.outerHTML
@@ -225,7 +269,7 @@ const scrapeProductDetails = async (page, url) => {
         rating,
         specifications,
         categories,
-        descriptionHtml, // New field for the HTML content
+        descriptionHtml,
       };
     });
 
@@ -243,7 +287,7 @@ const scrapeProductDetails = async (page, url) => {
       rating: productDetails.rating,
       specifications: productDetails.specifications,
       categories: productDetails.categories,
-      descriptionHtml: productDetails.descriptionHtml, // Include in the return object
+      description: productDetails.descriptionHtml,
     };
   } catch (error) {
     console.error(`Error scraping ${url}:`, error.message);
@@ -258,7 +302,7 @@ const scrapeProductDetails = async (page, url) => {
       rating: null,
       specifications: [],
       categories: "",
-      descriptionHtml: null, // Default value on error
+      description: null,
     };
   }
 };
