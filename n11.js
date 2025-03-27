@@ -37,7 +37,7 @@ const launchBrowser = async (retries = 3) => {
     try {
       if (browser && browser.isConnected()) return browser;
       browser = await puppeteer.launch({
-        headless: true, // Headless mode for server
+        headless: false, // Headless mode for server
         protocolTimeout: 86400000,
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       });
