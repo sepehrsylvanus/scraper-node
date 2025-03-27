@@ -2,34 +2,64 @@ const puppeteer = require("puppeteer");
 const cheerio = require("cheerio");
 const fs = require("fs");
 const path = require("path");
-const { default: axios } = require("axios");
-const port = 33335;
-const session_id = (1000000 * Math.random()) | 0;
-const options = {
-  auth: {
-    username: `brd-customer-hl_7930d613-zone-davutbey-session-${session_id}`,
-    password: "3wa371vuwi2e",
-  },
-  host: "brd.superproxy.io",
-  port,
-  rejectUnauthorized: false,
-};
-const outputDir = path.join(__dirname, "output");
-if (!fs.existsSync(outputDir)) {
-  fs.mkdirSync(outputDir);
-}
+const axios = require("axios");
 
 let browser;
 let shouldStop = false;
+
+// Proxy list fetched from free-proxy-list.net
+let proxyList = [];
+let proxyIndex = 0;
 
 const today = new Date("2025-03-10");
 const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
   2,
   "0"
 )}-${String(today.getDate()).padStart(2, "0")}`;
+const outputDir = path.join(__dirname, "output");
+if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
 // Utility to delay execution
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Fetch free proxies from free-proxy-list.net
+const fetchFreeProxies = async () => {
+  try {
+    const response = await axios.get("https://free-proxy-list.net/", {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+      },
+    });
+    const $ = cheerio.load(response.data);
+    const proxies = [];
+    $("#list tbody tr").each((i, row) => {
+      const cols = $(row).find("td");
+      const host = $(cols[0]).text().trim();
+      const port = parseInt($(cols[1]).text().trim());
+      const isHttps = $(cols[6]).text().trim() === "yes";
+      if (host && port && !isHttps) {
+        // Use HTTP proxies only for simplicity
+        proxies.push({ host, port });
+      }
+    });
+    console.log(
+      `Fetched ${proxies.length} free proxies from free-proxy-list.net`
+    );
+    return proxies;
+  } catch (error) {
+    console.error("Failed to fetch proxies:", error.message);
+    return [];
+  }
+};
+
+// Get the next proxy from the list
+const getNextProxy = () => {
+  if (!proxyList.length) return null;
+  const proxy = proxyList[proxyIndex];
+  proxyIndex = (proxyIndex + 1) % proxyList.length; // Rotate through the list
+  return proxy;
+};
 
 // Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
@@ -37,8 +67,7 @@ const launchBrowser = async (retries = 3) => {
     try {
       if (browser && browser.isConnected()) return browser;
       browser = await puppeteer.launch({
-        headless: false, // Headless mode for server
-        protocolTimeout: 86400000,
+        headless: true, // Headless mode for free proxies
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       });
       return browser;
@@ -78,12 +107,11 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
 
     try {
       await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 60000 });
-      await delay(5000); // Increased delay to avoid rate limiting
+      await delay(5000);
 
       const html = await page.content();
       const $ = cheerio.load(html);
 
-      // Get total products if not already set
       if (currentPage === 1) {
         const resultText = $(".listOptionHolder .resultText strong").text();
         totalProducts = resultText
@@ -124,17 +152,29 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
   return { productUrls: Array.from(allProductUrls), totalProducts };
 };
 
-// Scrape individual product details with retries using Cheerio
-const scrapeProductDetails = async (page, url, retries = 3) => {
+// Scrape individual product details with rotating free proxies
+const scrapeProductDetails = async (browser, url, retries = 3) => {
   for (let i = 0; i < retries; i++) {
+    let page;
     try {
-      const response = await axios.get(url, options);
-      console.log(`Scraping product: ${url}`);
+      const proxy = getNextProxy();
+      if (!proxy) throw new Error("No available proxies");
+      const proxyArg = `--proxy-server=${proxy.host}:${proxy.port}`;
+      console.log(
+        `Scraping product with proxy ${proxy.host}:${proxy.port}: ${url}`
+      );
+
+      page = await browser.newPage();
+      await page.setExtraHTTPHeaders({
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+      });
+
       await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
       await delay(3000);
 
       const html = await page.content();
-      const $ = cheerio.load(response.data);
+      const $ = cheerio.load(html);
 
       const title = $(".unf-p-title .proName").text().trim() || null;
       let brand = null;
@@ -186,6 +226,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
         null;
       const productId = url.match(/-(\d+)(?:[?/#]|$)/)?.[1] || null;
 
+      await page.close();
       return {
         url,
         title,
@@ -202,6 +243,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
       };
     } catch (error) {
       console.error(`Attempt ${i + 1} failed for ${url}:`, error.message);
+      if (page) await page.close();
       if (i === retries - 1) {
         return {
           url,
@@ -219,7 +261,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           error: error.message,
         };
       }
-      await delay(5000);
+      await delay(5000); // Wait before retrying with a new proxy
     }
   }
 };
@@ -262,8 +304,15 @@ const scrapeMultipleUrls = async () => {
     process.exit(1);
   }
 
+  // Fetch proxies before starting
+  proxyList = await fetchFreeProxies();
+  if (!proxyList.length) {
+    console.error("No proxies available. Exiting.");
+    process.exit(1);
+  }
+
   try {
-    await launchBrowser();
+    const browser = await launchBrowser();
     const n11Dir = path.join(outputDir, "n11");
     if (!fs.existsSync(n11Dir)) fs.mkdirSync(n11Dir, { recursive: true });
 
@@ -285,9 +334,10 @@ const scrapeMultipleUrls = async () => {
       saveProductsToFile(productsArray, outputFileName);
 
       const mainPage = await browser.newPage();
-      await mainPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
+      await mainPage.setExtraHTTPHeaders({
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+      });
 
       const { productUrls, totalProducts } = await scrapePageByPage(
         mainPage,
@@ -307,21 +357,14 @@ const scrapeMultipleUrls = async () => {
           continue;
         }
 
-        const productPage = await browser.newPage();
-        try {
-          const details = await scrapeProductDetails(productPage, productUrl);
-          productsArray.push(details);
-          processedUrls.add(productUrl);
-          saveProductsToFile(productsArray, outputFileName);
-          console.log(
-            `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
-          );
-        } catch (error) {
-          console.error(`Failed to scrape ${productUrl}:`, error);
-        } finally {
-          await productPage.close();
-        }
-        await delay(2000); // Rate limiting
+        const details = await scrapeProductDetails(browser, productUrl);
+        productsArray.push(details);
+        processedUrls.add(productUrl);
+        saveProductsToFile(productsArray, outputFileName);
+        console.log(
+          `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
+        );
+        await delay(Math.random() * 5000 + 2000); // Random delay between 2-7 seconds
       }
 
       while (totalProducts > 0 && processedUrls.size < totalProducts - 1) {
@@ -338,19 +381,14 @@ const scrapeMultipleUrls = async () => {
 
         for (const productUrl of newUrls) {
           if (processedUrls.has(productUrl)) continue;
-          const productPage = await browser.newPage();
-          try {
-            const details = await scrapeProductDetails(productPage, productUrl);
-            productsArray.push(details);
-            processedUrls.add(productUrl);
-            saveProductsToFile(productsArray, outputFileName);
-            console.log(
-              `Retry Progress: ${productsArray.length}/${totalProducts}`
-            );
-          } finally {
-            await productPage.close();
-          }
-          await delay(2000);
+          const details = await scrapeProductDetails(browser, productUrl);
+          productsArray.push(details);
+          processedUrls.add(productUrl);
+          saveProductsToFile(productsArray, outputFileName);
+          console.log(
+            `Retry Progress: ${productsArray.length}/${totalProducts}`
+          );
+          await delay(Math.random() * 5000 + 2000);
         }
       }
 
@@ -376,4 +414,5 @@ process.on("SIGINT", async () => {
   process.exit(0);
 });
 
+// Run the script
 scrapeMultipleUrls();
