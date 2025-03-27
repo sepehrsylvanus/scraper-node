@@ -31,7 +31,7 @@ const launchBrowser = async (retries = 3) => {
       if (browser && browser.isConnected()) return browser;
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false, // Set to true for production if needed
+        headless: false, // Set to true for production
         protocolTimeout: 86400000, // 24-hour timeout
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       });
@@ -46,15 +46,19 @@ const launchBrowser = async (retries = 3) => {
 
 // Extract product URLs from Amazon search results page
 const extractProductUrls = async (page, baseUrl) => {
-  logProgress("URL_COLLECTION", `Navigating to exact URL: ${baseUrl}`);
-  await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
-
+  logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
-  let previousHeight = 0;
-  let stagnantCount = 0;
-  const maxStagnantAttempts = 5;
+  let currentPage = 1;
 
   while (!shouldStop) {
+    const currentUrl =
+      currentPage === 1 ? baseUrl : `${baseUrl}&page=${currentPage}`;
+    logProgress(
+      "URL_COLLECTION",
+      `Navigating to page ${currentPage}: ${currentUrl}`
+    );
+    await page.goto(currentUrl, { waitUntil: "networkidle2", timeout: 60000 });
+
     const currentUrls = await page.evaluate(() => {
       const productElements = document.querySelectorAll(
         ".s-result-item.s-asin .s-product-image-container a.a-link-normal"
@@ -64,7 +68,6 @@ const extractProductUrls = async (page, baseUrl) => {
         .filter((url) => url && !url.includes("javascript:"));
     });
 
-    const previousSize = allProductUrls.size;
     currentUrls.forEach((url) => {
       const absoluteUrl = url.startsWith("http")
         ? url
@@ -77,54 +80,35 @@ const extractProductUrls = async (page, baseUrl) => {
       `Found ${allProductUrls.size} unique URLs so far...`
     );
 
-    await page.evaluate(() => window.scrollBy(0, 1000));
-    await delay(2000);
-
-    const currentHeight = await page.evaluate(() => document.body.scrollHeight);
-
-    if (currentHeight === previousHeight) {
-      stagnantCount++;
+    // Check for next page
+    const nextButton = await page.$(
+      ".s-pagination-container .s-pagination-next:not(.s-pagination-disabled)"
+    );
+    if (!nextButton) {
       logProgress(
         "URL_COLLECTION",
-        `No height change detected (attempt ${stagnantCount}/${maxStagnantAttempts})`
+        "No enabled 'Next' button found. Stopping."
       );
-      if (stagnantCount >= maxStagnantAttempts) {
-        logProgress(
-          "URL_COLLECTION",
-          `No new content after ${maxStagnantAttempts} attempts. Stopping at ${allProductUrls.size} URLs.`
-        );
-        break;
-      }
-    } else {
-      stagnantCount = 0;
+      break;
     }
 
-    previousHeight = currentHeight;
-
-    const atBottom = await page.evaluate(() => {
-      return window.scrollY + window.innerHeight >= document.body.scrollHeight;
+    const isLastPage = await page.evaluate(() => {
+      const nextButton = document.querySelector(
+        ".s-pagination-container .s-pagination-next"
+      );
+      return nextButton.classList.contains("s-pagination-disabled");
     });
-    if (atBottom && allProductUrls.size === previousSize) {
-      logProgress(
-        "URL_COLLECTION",
-        "Reached page bottom with no new URLs. Stopping."
-      );
+
+    if (isLastPage) {
+      logProgress("URL_COLLECTION", "Reached last page. Stopping.");
       break;
     }
 
-    const nextButton = await page.$("a.s-pagination-next");
-    if (nextButton && allProductUrls.size < 1000) {
-      logProgress("URL_COLLECTION", "Clicking 'Next' button for pagination...");
-      await nextButton.click();
-      await page.waitForNavigation({
-        waitUntil: "networkidle2",
-        timeout: 60000,
-      });
-      previousHeight = 0;
-    } else if (!nextButton) {
-      logProgress("URL_COLLECTION", "No 'Next' button found. Stopping.");
-      break;
-    }
+    logProgress("URL_COLLECTION", `Moving to page ${currentPage + 1}...`);
+    await nextButton.click();
+    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 });
+    currentPage++;
+    await delay(2000); // Polite delay between page loads
   }
 
   return Array.from(allProductUrls);
@@ -135,12 +119,11 @@ const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-  // Wait for key elements to ensure they’re loaded
   try {
     await page.waitForSelector("#acrPopover", { timeout: 10000 });
-    logProgress("PRODUCT_SCRAPING", "Rating section found in acrPopover.");
+    logProgress("PRODUCT_SCRAPING", "Rating section found.");
   } catch (error) {
-    logProgress("PRODUCT_SCRAPING", "Rating section not found within timeout.");
+    logProgress("PRODUCT_SCRAPING", "Rating section not found.");
   }
 
   try {
@@ -149,24 +132,17 @@ const scrapeProductDetails = async (page, url) => {
     });
     logProgress("PRODUCT_SCRAPING", "Specifications table found.");
   } catch (error) {
-    logProgress(
-      "PRODUCT_SCRAPING",
-      "Specifications table not found within timeout."
-    );
+    logProgress("PRODUCT_SCRAPING", "Specifications table not found.");
   }
 
   try {
     await page.waitForSelector("#feature-bullets", { timeout: 10000 });
     logProgress("PRODUCT_SCRAPING", "Feature bullets section found.");
   } catch (error) {
-    logProgress(
-      "PRODUCT_SCRAPING",
-      "Feature bullets section not found within timeout."
-    );
+    logProgress("PRODUCT_SCRAPING", "Feature bullets section not found.");
   }
 
   const productData = await page.evaluate(() => {
-    // Extract price and currency
     let price = null;
     let currency = "";
     const wholePriceElement = document.querySelector("span.a-price-whole");
@@ -186,11 +162,9 @@ const scrapeProductDetails = async (page, url) => {
       if (price > 100) price = price / 1000;
     }
 
-    // Extract product ID from URL
     const productIdMatch = window.location.href.match(/\/dp\/([A-Z0-9]{10})/);
     const productId = productIdMatch ? productIdMatch[1] : "";
 
-    // Extract brand
     let brand = "";
     const techTableRows = document.querySelectorAll(
       "#productDetails_techSpec_section_1 tr"
@@ -204,11 +178,9 @@ const scrapeProductDetails = async (page, url) => {
       }
     }
 
-    // Extract title
     const titleElement = document.querySelector("#productTitle");
     const title = titleElement ? titleElement.textContent.trim() : "";
 
-    // Extract image URLs and video thumbnails
     const imageElements = document.querySelectorAll(
       "#altImages .imageThumbnail img"
     );
@@ -226,7 +198,6 @@ const scrapeProductDetails = async (page, url) => {
     });
     const imagesString = allImages.join(";");
 
-    // Extract rating
     let rating = null;
     const ratingElement = document.querySelector(
       "#acrPopover .a-size-base.a-color-base"
@@ -236,7 +207,6 @@ const scrapeProductDetails = async (page, url) => {
       rating = parseFloat(ratingText);
     }
 
-    // Extract specifications
     const specifications = [];
     const specRows = document.querySelectorAll(
       "#productDetails_techSpec_section_1 tr"
@@ -251,7 +221,6 @@ const scrapeProductDetails = async (page, url) => {
       }
     });
 
-    // Extract categories from breadcrumb
     const categoryElements = document.querySelectorAll(
       "ul.a-unordered-list.a-horizontal .a-list-item a.a-link-normal"
     );
@@ -259,7 +228,6 @@ const scrapeProductDetails = async (page, url) => {
       .map((el) => el.textContent.trim())
       .join(">");
 
-    // Extract description from feature-bullets
     let description = "";
     const featureBullets = document.querySelector("#feature-bullets");
     if (featureBullets) {
@@ -285,7 +253,6 @@ const scrapeProductDetails = async (page, url) => {
     };
   });
 
-  // Refine product ID extraction
   const productIdMatch = url.match(/\/dp\/([A-Z0-9]{10})/);
   productData.productId = productIdMatch
     ? productIdMatch[1]
@@ -308,6 +275,7 @@ const scrapeProductDetails = async (page, url) => {
     description: productData.description || "",
   };
 };
+
 // Save data to file
 const saveUrlsToFile = (data, filePath) => {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
@@ -334,7 +302,7 @@ const loadExistingUrls = (baseUrl, dir) => {
   return existingUrls;
 };
 
-// Main scraping function// Main scraping function
+// Main scraping function
 const scrapeAmazonUrls = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
@@ -349,7 +317,7 @@ const scrapeAmazonUrls = async () => {
     const browser = await launchBrowser();
 
     for (const baseUrl of urls) {
-      logProgress("MAIN", `Processing exact URL: ${baseUrl}`);
+      logProgress("MAIN", `Processing base URL: ${baseUrl}`);
       let processedUrls = loadExistingUrls(baseUrl, amazonDir);
       let productDataArray = [];
 
@@ -364,7 +332,6 @@ const scrapeAmazonUrls = async () => {
         `products_${dateStr}_${urlSlug}_${timestamp}.json`
       );
 
-      // Load existing data from file if it exists
       if (fs.existsSync(outputFileName)) {
         try {
           const existingData = fs.readFileSync(outputFileName, "utf8");
@@ -387,13 +354,15 @@ const scrapeAmazonUrls = async () => {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
       );
 
-      // Step 1: Collect all product URLs
+      // Collect all product URLs across pages
       const productUrls = await extractProductUrls(page, baseUrl);
       await page.close();
 
-      logProgress("MAIN", `Found ${productUrls.length} product URLs`);
+      logProgress(
+        "MAIN",
+        `Found ${productUrls.length} product URLs across all pages`
+      );
 
-      // Step 2: Scrape details from each product page
       const productPage = await browser.newPage();
       await productPage.setViewport({ width: 1366, height: 768 });
       await productPage.setUserAgent(
@@ -413,9 +382,7 @@ const scrapeAmazonUrls = async () => {
             "MAIN",
             `Scraped details for ${url}: Price=${productData.price}, Currency=${productData.currency}`
           );
-
-          // Write to file after each product
-          saveUrlsToFile(productDataArray, outputFileName);
+          saveUrlsToFile(productDataArray, outputFileName); // Save after each product
         } catch (error) {
           console.error(`Failed to scrape ${url}:`, error);
           productDataArray.push({
@@ -431,10 +398,9 @@ const scrapeAmazonUrls = async () => {
             categories: "",
             description: "",
           });
-          // Write to file even if scraping fails, to save the error entry
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(1000); // Polite delay to avoid overwhelming the server
+        await delay(1000); // Polite delay
       }
 
       await productPage.close();
