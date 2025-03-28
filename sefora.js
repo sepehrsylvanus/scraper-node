@@ -24,7 +24,7 @@ const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
-// Launch browser with retry logic and initial scroll
+// Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
@@ -44,7 +44,7 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs with initial scroll and button handling
+// Extract product URLs with footer detection, total products check, and scroll reset
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
@@ -67,16 +67,15 @@ const extractProductUrls = async (page, baseUrl) => {
         "button.see-more-button[data-js-infinitescroll-see-more]"
       );
       if (seeMoreButton) {
-        // Scroll to make button visible
         seeMoreButton.scrollIntoView({
           behavior: "smooth",
           block: "center",
         });
-        await new Promise((resolve) => setTimeout(resolve, 500)); // Wait for scroll
+        await new Promise((resolve) => setTimeout(resolve, 500));
         seeMoreButton.focus();
-        await new Promise((resolve) => setTimeout(resolve, 500)); // Wait before click
+        await new Promise((resolve) => setTimeout(resolve, 500));
         seeMoreButton.click();
-        await new Promise((resolve) => setTimeout(resolve, 3000)); // Wait for content
+        await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     });
     logProgress("URL_COLLECTION", "Initial scroll and button click completed");
@@ -87,16 +86,69 @@ const extractProductUrls = async (page, baseUrl) => {
     );
   }
 
-  // Infinite scroll logic
-  let previousHeight = 0;
-  let scrollCount = 0;
-  const maxScrolls = 100;
+  // Infinite scroll logic with footer detection and scroll reset
+  let previousProductCount = 0;
+  let noNewProductsTime = 0;
+  const maxNoNewProductsTime = 5000; // 5 seconds
+  const scrollStep = 500;
+  const minProductsToCollect = totalProducts - 1;
 
-  while (
-    !shouldStop &&
-    scrollCount < maxScrolls &&
-    allProductUrls.size < totalProducts
-  ) {
+  while (!shouldStop) {
+    // Check if we've reached our target number of products
+    if (allProductUrls.size >= minProductsToCollect) {
+      logProgress(
+        "URL_COLLECTION",
+        `Reached target of ${minProductsToCollect} products. Stopping scroll.`
+      );
+      break;
+    }
+
+    // Check if footer is visible
+    const footerVisible = await page.evaluate(() => {
+      const footer = document.querySelector(
+        ".content-asset.footer-reinssurance"
+      );
+      if (footer) {
+        const rect = footer.getBoundingClientRect();
+        return (
+          rect.top >= 0 &&
+          rect.bottom <=
+            (window.innerHeight || document.documentElement.clientHeight)
+        );
+      }
+      return false;
+    });
+
+    if (footerVisible) {
+      logProgress("URL_COLLECTION", "Footer reached.");
+      if (allProductUrls.size < minProductsToCollect) {
+        logProgress(
+          "URL_COLLECTION",
+          `Only ${allProductUrls.size} products found out of ${totalProducts} expected. Scrolling to top and retrying.`
+        );
+
+        // Scroll to top
+        await page.evaluate(() => {
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+        await delay(2000); // Wait for scroll to complete
+
+        // Scroll back down
+        await page.evaluate(async (step) => {
+          for (let i = 0; i < document.body.scrollHeight; i += step) {
+            window.scrollBy(0, step);
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }, scrollStep);
+
+        logProgress("URL_COLLECTION", "Completed scroll reset");
+        continue; // Continue the loop after resetting scroll
+      } else {
+        break;
+      }
+    }
+
+    // Get current product URLs
     const currentUrls = await page.evaluate(() => {
       const productElements = document.querySelectorAll(
         ".product-tile.clickable"
@@ -115,21 +167,41 @@ const extractProductUrls = async (page, baseUrl) => {
       `Progress: ${allProductUrls.size}/${totalProducts} unique URLs collected`
     );
 
-    previousHeight = await page.evaluate("document.body.scrollHeight");
-    await page.evaluate("window.scrollBy(0, 500)");
-    scrollCount++;
+    // Check if new products were loaded
+    if (allProductUrls.size === previousProductCount) {
+      noNewProductsTime += 1000;
+      if (noNewProductsTime >= maxNoNewProductsTime) {
+        logProgress(
+          "URL_COLLECTION",
+          `No new products for 5 seconds. Current count: ${allProductUrls.size}/${totalProducts}`
+        );
+        if (allProductUrls.size < minProductsToCollect) {
+          logProgress(
+            "URL_COLLECTION",
+            "Haven't reached target count. Continuing scroll."
+          );
+          noNewProductsTime = 0;
+        } else {
+          break;
+        }
+      }
+    } else {
+      noNewProductsTime = 0;
+      previousProductCount = allProductUrls.size;
+    }
+
+    // Scroll down
+    await page.evaluate((step) => {
+      window.scrollBy(0, step);
+    }, scrollStep);
     await delay(1000);
+  }
 
-    const newHeight = await page.evaluate("document.body.scrollHeight");
-    if (newHeight === previousHeight) {
-      logProgress("URL_COLLECTION", "No new content loaded. Stopping scroll.");
-      break;
-    }
-
-    if (allProductUrls.size >= totalProducts) {
-      logProgress("URL_COLLECTION", "Reached total product count. Stopping.");
-      break;
-    }
+  if (allProductUrls.size < minProductsToCollect) {
+    logProgress(
+      "URL_COLLECTION",
+      `Warning: Only collected ${allProductUrls.size} out of ${totalProducts} expected products`
+    );
   }
 
   return Array.from(allProductUrls);
