@@ -44,21 +44,18 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs from the cosmetic website listing page
+// Extract product URLs from the cosmetic website listing page with infinite scroll
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
-  let currentPage = 1;
+  await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-  while (!shouldStop) {
-    const currentUrl =
-      currentPage === 1 ? baseUrl : `${baseUrl}?page=${currentPage}`;
-    logProgress(
-      "URL_COLLECTION",
-      `Navigating to page ${currentPage}: ${currentUrl}`
-    );
-    await page.goto(currentUrl, { waitUntil: "networkidle2", timeout: 60000 });
+  let previousUrlCount = 0;
+  let noNewContentCount = 0;
+  const maxNoNewContentAttempts = 3; // Stop after 3 attempts with no new content
 
+  while (!shouldStop && noNewContentCount < maxNoNewContentAttempts) {
+    // Collect current URLs
     const currentUrls = await page.evaluate(() => {
       const productElements = document.querySelectorAll(
         "a.flex.h-full.w-full.grow.flex-col.overflow-hidden.rounded.rounded-b-none.border.border-b-0.border-neutral-300\\/70"
@@ -80,20 +77,36 @@ const extractProductUrls = async (page, baseUrl) => {
       `Found ${allProductUrls.size} unique URLs so far...`
     );
 
-    const nextButton = await page.$("button.next-page:not(.disabled)");
-    if (!nextButton) {
+    // Check if new URLs were found
+    if (allProductUrls.size === previousUrlCount) {
+      noNewContentCount++;
       logProgress(
         "URL_COLLECTION",
-        "No enabled 'Next' button found. Stopping."
+        `No new URLs found (attempt ${noNewContentCount}/${maxNoNewContentAttempts})`
       );
-      break;
+    } else {
+      noNewContentCount = 0; // Reset counter if new content is found
+      previousUrlCount = allProductUrls.size;
     }
 
-    logProgress("URL_COLLECTION", `Moving to page ${currentPage + 1}...`);
-    await nextButton.click();
-    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 });
-    currentPage++;
-    await delay(2000);
+    // Scroll down 500 pixels
+    await page.evaluate(() => window.scrollBy(0, 500));
+    logProgress("URL_COLLECTION", "Scrolled down 500 pixels");
+
+    // Wait for half a second
+    await delay(500);
+
+    // Wait for network to settle after scroll
+    await page.waitForNetworkIdle({ timeout: 5000 }).catch(() => {
+      logProgress("URL_COLLECTION", "Network idle timeout, continuing...");
+    });
+  }
+
+  if (noNewContentCount >= maxNoNewContentAttempts) {
+    logProgress(
+      "URL_COLLECTION",
+      "Reached end of infinite scroll - no new products loaded"
+    );
   }
 
   return Array.from(allProductUrls);
@@ -133,12 +146,11 @@ const scrapeProductDetails = async (page, url) => {
       ? descriptionElement.textContent.trim()
       : null;
 
-    // Extract categories from breadcrumb (excluding last item) and join with ">"
     const breadcrumbItems = document.querySelectorAll(
       "nav[aria-label='breadcrumb'] ul li"
     );
     const categoriesArray = Array.from(breadcrumbItems)
-      .slice(0, -1) // Exclude the last item (product name)
+      .slice(0, -1)
       .map((item) => {
         const link = item.querySelector("a");
         return link ? link.textContent.trim() : null;
@@ -147,7 +159,6 @@ const scrapeProductDetails = async (page, url) => {
     const categories =
       categoriesArray.length > 0 ? categoriesArray.join(">") : null;
 
-    // Extract product ID from URL (second part after domain)
     const productId = window.location.href.replace(
       "https://www.cosmetica.com.tr/",
       ""
@@ -269,7 +280,7 @@ const scrapeCosmeticUrls = async () => {
 
       logProgress(
         "MAIN",
-        `Found ${productUrls.length} product URLs across all pages`
+        `Found ${productUrls.length} product URLs through infinite scroll`
       );
 
       const productPage = await browser.newPage();
@@ -319,7 +330,7 @@ const scrapeCosmeticUrls = async () => {
     if (browser) await browser.close();
     process.exit(0);
   } catch (error) {
-    console.error("[FATAL] Fatal error:", error);
+    console.error("[Fatal] Fatal error:", error);
     if (browser) await browser.close();
     process.exit(1);
   }
