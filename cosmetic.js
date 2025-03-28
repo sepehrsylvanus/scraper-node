@@ -31,8 +31,8 @@ const launchBrowser = async (retries = 3) => {
       if (browser && browser.isConnected()) return browser;
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false, // Set to true for production
-        protocolTimeout: 86400000, // 24-hour timeout
+        headless: false,
+        protocolTimeout: 86400000,
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       });
       return browser;
@@ -80,8 +80,7 @@ const extractProductUrls = async (page, baseUrl) => {
       `Found ${allProductUrls.size} unique URLs so far...`
     );
 
-    // Check for next page (assuming a common pagination class or button)
-    const nextButton = await page.$("button.next-page:not(.disabled)"); // Adjust selector as needed
+    const nextButton = await page.$("button.next-page:not(.disabled)");
     if (!nextButton) {
       logProgress(
         "URL_COLLECTION",
@@ -94,7 +93,7 @@ const extractProductUrls = async (page, baseUrl) => {
     await nextButton.click();
     await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 });
     currentPage++;
-    await delay(2000); // Polite delay between page loads
+    await delay(2000);
   }
 
   return Array.from(allProductUrls);
@@ -106,122 +105,84 @@ const scrapeProductDetails = async (page, url) => {
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
   const productData = await page.evaluate(() => {
-    const productContainer = document.querySelector(
-      ".relative.flex.h-full.w-full.grow.flex-col.overflow-hidden"
-    );
-    if (!productContainer) return null;
-
-    // Extract brand
-    const brandElement = productContainer.querySelector(
-      ".text-left.text-xs.font-bold.uppercase"
-    );
-    const brand = brandElement ? brandElement.textContent.trim() : "";
-
-    // Extract title
-    const titleElement = productContainer.querySelector(
-      ".mb-1.mt-0\\.5.text-left.text-sm.font-semibold"
-    );
-    const title = titleElement ? titleElement.textContent.trim() : "";
-
-    // Extract price and currency
-    let price = null;
-    let currency = "";
-    const priceElement = productContainer.querySelector(
-      ".text-base.font-semibold.\\!leading-none.text-button-01"
-    );
-    const originalPriceElement = productContainer.querySelector(
-      ".pb-1.text-xs.font-medium.\\!leading-none.text-button-01\\/50.line-through"
-    );
-    if (priceElement) {
-      const priceText = priceElement.textContent.trim();
-      currency = priceText.match(/[^\d.,]+/)?.[0] || "₺";
-      price = parseFloat(priceText.replace(/[^\d.,]/g, "").replace(",", "."));
-    }
-    const originalPrice = originalPriceElement
-      ? parseFloat(
-          originalPriceElement.textContent
-            .trim()
-            .replace(/[^\d.,]/g, "")
-            .replace(",", ".")
-        )
-      : null;
-
-    // Extract discount percentage
-    const discountElement = productContainer.querySelector(
-      ".flex.flex-col.items-center.justify-center.rounded.bg-button-02 span:nth-child(2)"
-    );
-    const discount = discountElement
-      ? discountElement.textContent.trim().replace("%", "")
-      : null;
-
-    // Extract rating and review count
-    let rating = null;
-    let reviewCount = 0;
-    const ratingContainer = productContainer.querySelector(
-      ".mb-3\\.5.flex.items-center.gap-1.text-\\[10px\\].font-medium"
-    );
-    if (ratingContainer) {
-      const stars = ratingContainer.querySelectorAll("svg");
-      rating = stars.length > 0 ? stars.length : null; // Assuming filled stars indicate rating
-      const reviewElement = ratingContainer.querySelector("span.opacity-50");
-      reviewCount = reviewElement
-        ? parseInt(reviewElement.textContent.trim().replace(/[()]/g, ""), 10)
-        : 0;
-    }
-
-    // Extract image URLs
-    const imageElements = productContainer.querySelectorAll("img");
+    const imageElements = document.querySelectorAll("img");
     const images = Array.from(imageElements)
       .map((img) => img.getAttribute("src"))
-      .filter((src) => src && src.includes("cdn.myikas.com"));
+      .filter((src) => src && src.startsWith("http"));
+
+    const brandElement = document.querySelector(
+      "a.-mb-px.text-sm.font-bold.text-button-01\\/70"
+    );
+    const titleElement = document.querySelector("h1.mb-2.text-left.text-lg");
+
+    const priceElement = document.querySelector(
+      "div.text-base.font-semibold.\\!leading-none.text-button-01.md\\:text-lg"
+    );
+    const priceText = priceElement ? priceElement.textContent.trim() : null;
+    const price = priceText ? priceText.replace("₺", "").trim() : null;
+
+    const starElements = document.querySelectorAll("svg.size-\\15px\\]");
+    const rating = Array.from(starElements).filter((star) =>
+      star.classList.contains("text-amber-500")
+    ).length;
+
+    const descriptionElement = document.querySelector(
+      "div.prose.prose-sm.mt-6.max-w-none > div"
+    );
+    const description = descriptionElement
+      ? descriptionElement.textContent.trim()
+      : null;
+
+    // Extract categories from breadcrumb (excluding last item) and join with ">"
+    const breadcrumbItems = document.querySelectorAll(
+      "nav[aria-label='breadcrumb'] ul li"
+    );
+    const categoriesArray = Array.from(breadcrumbItems)
+      .slice(0, -1) // Exclude the last item (product name)
+      .map((item) => {
+        const link = item.querySelector("a");
+        return link ? link.textContent.trim() : null;
+      })
+      .filter(Boolean);
+    const categories =
+      categoriesArray.length > 0 ? categoriesArray.join(">") : null;
+
+    // Extract product ID from URL (second part after domain)
+    const productId = window.location.href.replace(
+      "https://www.cosmetica.com.tr/",
+      ""
+    );
 
     return {
       url: window.location.href,
-      brand,
-      title,
-      price,
-      originalPrice,
-      currency,
-      discount,
-      rating,
-      reviewCount,
-      images: images.join(";"),
+      productId: productId,
+      brand: brandElement ? brandElement.textContent.trim() : null,
+      title: titleElement ? titleElement.textContent.trim() : null,
+      price: price,
+      currency: priceText && priceText.includes("₺") ? "TRY" : null,
+      rating: rating,
+      images: images.length > 0 ? images : null,
+      description: description,
+      categories: categories,
     };
   });
 
   if (!productData) {
     return {
       url,
-      brand: "",
-      title: "",
+      productId: url.replace("https://www.cosmetica.com.tr/", ""),
+      brand: null,
+      title: null,
       price: null,
-      originalPrice: null,
-      currency: "",
-      discount: null,
+      currency: null,
       rating: null,
-      reviewCount: 0,
-      images: "",
+      images: null,
+      description: null,
+      categories: null,
     };
   }
 
-  return {
-    url: productData.url,
-    brand: productData.brand,
-    title: productData.title,
-    price:
-      productData.price !== null
-        ? parseFloat(productData.price.toFixed(2))
-        : null,
-    originalPrice:
-      productData.originalPrice !== null
-        ? parseFloat(productData.originalPrice.toFixed(2))
-        : null,
-    currency: productData.currency,
-    discount: productData.discount ? parseFloat(productData.discount) : null,
-    rating: productData.rating,
-    reviewCount: productData.reviewCount,
-    images: productData.images || "",
-  };
+  return productData;
 };
 
 // Save data to file
@@ -303,7 +264,6 @@ const scrapeCosmeticUrls = async () => {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
       );
 
-      // Collect all product URLs across pages
       const productUrls = await extractProductUrls(page, baseUrl);
       await page.close();
 
@@ -327,28 +287,25 @@ const scrapeCosmeticUrls = async () => {
         try {
           const productData = await scrapeProductDetails(productPage, url);
           productDataArray.push(productData);
-          logProgress(
-            "MAIN",
-            `Scraped details for ${url}: Price=${productData.price}, Currency=${productData.currency}`
-          );
-          saveUrlsToFile(productDataArray, outputFileName); // Save after each product
+          logProgress("MAIN", `Scraped details for ${url}`);
+          saveUrlsToFile(productDataArray, outputFileName);
         } catch (error) {
           console.error(`Failed to scrape ${url}:`, error);
           productDataArray.push({
             url,
-            brand: "",
-            title: "",
+            productId: url.replace("https://www.cosmetica.com.tr/", ""),
+            brand: null,
+            title: null,
             price: null,
-            originalPrice: null,
-            currency: "",
-            discount: null,
+            currency: null,
             rating: null,
-            reviewCount: 0,
-            images: "",
+            images: null,
+            description: null,
+            categories: null,
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(1000); // Polite delay
+        await delay(1000);
       }
 
       await productPage.close();
