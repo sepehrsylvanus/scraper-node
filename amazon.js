@@ -49,66 +49,112 @@ const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
   let currentPage = 1;
+  const maxPages = 10; // Safety limit to prevent infinite loops
 
-  while (!shouldStop) {
+  while (!shouldStop && currentPage <= maxPages) {
     const currentUrl =
       currentPage === 1 ? baseUrl : `${baseUrl}&page=${currentPage}`;
     logProgress(
       "URL_COLLECTION",
       `Navigating to page ${currentPage}: ${currentUrl}`
     );
-    await page.goto(currentUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-    const currentUrls = await page.evaluate(() => {
-      const productElements = document.querySelectorAll(
-        ".s-result-item.s-asin .s-product-image-container a.a-link-normal"
-      );
-      return Array.from(productElements)
-        .map((element) => element.getAttribute("href"))
-        .filter((url) => url && !url.includes("javascript:"));
-    });
+    try {
+      await page.goto(currentUrl, {
+        waitUntil: "networkidle2",
+        timeout: 60000,
+      });
 
-    currentUrls.forEach((url) => {
-      const absoluteUrl = url.startsWith("http")
-        ? url
-        : new URL(url, "https://www.amazon.com.tr").href;
-      allProductUrls.add(absoluteUrl);
-    });
+      const currentUrls = await page.evaluate(() => {
+        const productElements = document.querySelectorAll(
+          ".s-result-item.s-asin .s-product-image-container a.a-link-normal"
+        );
+        return Array.from(productElements)
+          .map((element) => element.getAttribute("href"))
+          .filter((url) => url && !url.includes("javascript:"));
+      });
 
-    logProgress(
-      "URL_COLLECTION",
-      `Found ${allProductUrls.size} unique URLs so far...`
-    );
+      currentUrls.forEach((url) => {
+        const absoluteUrl = url.startsWith("http")
+          ? url
+          : new URL(url, "https://www.amazon.com.tr").href;
+        allProductUrls.add(absoluteUrl);
+      });
 
-    // Check for next page
-    const nextButton = await page.$(
-      ".s-pagination-container .s-pagination-next:not(.s-pagination-disabled)"
-    );
-    if (!nextButton) {
       logProgress(
         "URL_COLLECTION",
-        "No enabled 'Next' button found. Stopping."
+        `Found ${allProductUrls.size} unique URLs so far...`
+      );
+
+      // Check for next page with more robust logic
+      const hasNextPage = await page.evaluate(() => {
+        const nextButton = document.querySelector(
+          ".s-pagination-container .s-pagination-next"
+        );
+        return (
+          nextButton &&
+          !nextButton.classList.contains("s-pagination-disabled") &&
+          !nextButton.getAttribute("aria-disabled")
+        );
+      });
+
+      if (!hasNextPage) {
+        logProgress(
+          "URL_COLLECTION",
+          "No enabled 'Next' button found or last page reached. Stopping."
+        );
+        break;
+      }
+
+      logProgress(
+        "URL_COLLECTION",
+        `Attempting to move to page ${currentPage + 1}...`
+      );
+
+      // More robust navigation attempt
+      const navigationPromise = page.evaluate(() => {
+        const nextButton = document.querySelector(
+          ".s-pagination-container .s-pagination-next"
+        );
+        if (nextButton) {
+          nextButton.click();
+          return true;
+        }
+        return false;
+      });
+
+      const clicked = await navigationPromise;
+      if (!clicked) {
+        logProgress("URL_COLLECTION", "Next button not clickable. Stopping.");
+        break;
+      }
+
+      try {
+        await page.waitForNavigation({
+          waitUntil: "networkidle2",
+          timeout: 60000,
+        });
+      } catch (navError) {
+        logProgress(
+          "URL_COLLECTION",
+          `Navigation timeout on page ${currentPage + 1}: ${
+            navError.message
+          }. Attempting to continue...`
+        );
+        // Try direct URL navigation as fallback
+        currentPage++;
+        continue;
+      }
+
+      currentPage++;
+      await delay(2000); // Polite delay between page loads
+    } catch (error) {
+      logProgress(
+        "URL_COLLECTION",
+        `Error on page ${currentPage}: ${error.message}. Stopping pagination.`
       );
       break;
     }
-
-    const isLastPage = await page.evaluate(() => {
-      const nextButton = document.querySelector(
-        ".s-pagination-container .s-pagination-next"
-      );
-      return nextButton.classList.contains("s-pagination-disabled");
-    });
-
-    if (isLastPage) {
-      logProgress("URL_COLLECTION", "Reached last page. Stopping.");
-      break;
-    }
-
-    logProgress("URL_COLLECTION", `Moving to page ${currentPage + 1}...`);
-    await nextButton.click();
-    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 });
-    currentPage++;
-    await delay(2000); // Polite delay between page loads
   }
 
   return Array.from(allProductUrls);
