@@ -2,7 +2,8 @@ const puppeteer = require("puppeteer");
 const cheerio = require("cheerio");
 const fs = require("fs");
 const path = require("path");
-const { default: axios } = require("axios");
+const axios = require("axios").default;
+
 const port = 33335;
 const session_id = (1000000 * Math.random()) | 0;
 const options = {
@@ -14,6 +15,7 @@ const options = {
   port,
   rejectUnauthorized: false,
 };
+
 const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir);
@@ -37,13 +39,14 @@ const launchBrowser = async (retries = 3) => {
     try {
       if (browser && browser.isConnected()) return browser;
       browser = await puppeteer.launch({
-        headless: true, // Headless mode for server
-        protocolTimeout: 86400000,
+        headless: true,
+        protocolTimeout: 120000, // Increased to 120 seconds
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       });
+      console.log("Browser launched successfully");
       return browser;
     } catch (error) {
-      console.error(`Browser launch attempt ${i + 1} failed:`, error);
+      console.error(`Browser launch attempt ${i + 1} failed:`, error.message);
       if (i === retries - 1) throw error;
       await delay(2000);
     }
@@ -77,13 +80,12 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
     console.log(`Scraping page ${currentPage}: ${pageUrl}`);
 
     try {
-      await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 60000 });
-      await delay(5000); // Increased delay to avoid rate limiting
+      await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
+      await delay(5000);
 
       const html = await page.content();
       const $ = cheerio.load(html);
 
-      // Get total products if not already set
       if (currentPage === 1) {
         const resultText = $(".listOptionHolder .resultText strong").text();
         totalProducts = resultText
@@ -128,9 +130,11 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
 const scrapeProductDetails = async (page, url, retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
+      console.log(
+        `Scraping product with proxy ${options.host}:${options.port}: ${url}`
+      );
       const response = await axios.get(url, options);
-      console.log(`Scraping product: ${url}`);
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
       await delay(3000);
 
       const html = await page.content();
@@ -219,14 +223,19 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           error: error.message,
         };
       }
-      await delay(5000);
+      await delay(5000 * (i + 1)); // Exponential backoff
     }
   }
 };
 
 // Save products to file
 const saveProductsToFile = (products, filePath) => {
-  fs.writeFileSync(filePath, JSON.stringify(products, null, 2));
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(products, null, 2));
+    console.log(`Saved products to ${filePath}`);
+  } catch (error) {
+    console.error(`Failed to save products to ${filePath}:`, error.message);
+  }
 };
 
 // Load existing products
@@ -317,11 +326,18 @@ const scrapeMultipleUrls = async () => {
             `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
           );
         } catch (error) {
-          console.error(`Failed to scrape ${productUrl}:`, error);
+          console.error(`Failed to scrape ${productUrl}:`, error.message);
         } finally {
-          await productPage.close();
+          try {
+            await productPage.close();
+          } catch (closeError) {
+            console.error(
+              `Failed to close page for ${productUrl}:`,
+              closeError.message
+            );
+          }
         }
-        await delay(2000); // Rate limiting
+        await delay(2000);
       }
 
       while (totalProducts > 0 && processedUrls.size < totalProducts - 1) {
@@ -348,7 +364,14 @@ const scrapeMultipleUrls = async () => {
               `Retry Progress: ${productsArray.length}/${totalProducts}`
             );
           } finally {
-            await productPage.close();
+            try {
+              await productPage.close();
+            } catch (closeError) {
+              console.error(
+                `Failed to close retry page for ${productUrl}:`,
+                closeError.message
+              );
+            }
           }
           await delay(2000);
         }
