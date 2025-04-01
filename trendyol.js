@@ -44,7 +44,7 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs from Trendyol listing page
+// Extract product URLs from Trendyol listing page with retries
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting scrape for: ${baseUrl}`);
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
@@ -75,69 +75,117 @@ const extractProductUrls = async (page, baseUrl) => {
   const maxStagnantAttempts = 5;
 
   while (!shouldStop) {
-    const currentUrls = await page.evaluate(() => {
-      const productElements = document.querySelectorAll(
-        ".p-card-chldrn-cntnr.card-border a"
-      );
-      return Array.from(productElements)
-        .map((element) => element.getAttribute("href"))
-        .filter((url) => url && !url.includes("javascript:"));
-    });
-
-    const previousSize = allProductUrls.size;
-    currentUrls.forEach((url) => {
-      const absoluteUrl = url.startsWith("http")
-        ? url
-        : new URL(url, "https://www.trendyol.com").href;
-      allProductUrls.add(absoluteUrl);
-    });
-
-    logProgress(
-      "URL_COLLECTION",
-      `Found ${allProductUrls.size} unique URLs so far...`
-    );
-
-    if (!isIndeterminate && allProductUrls.size >= totalProducts) {
-      logProgress(
-        "URL_COLLECTION",
-        `Collected sufficient products (${allProductUrls.size}/${totalProducts}).`
-      );
-      break;
-    }
-
-    await page.evaluate(() => window.scrollBy(0, 1000));
-    await delay(2000);
-
-    const currentHeight = await page.evaluate(() => document.body.scrollHeight);
-
-    if (currentHeight === previousHeight) {
-      stagnantCount++;
-      logProgress(
-        "URL_COLLECTION",
-        `No height change detected (attempt ${stagnantCount}/${maxStagnantAttempts})`
-      );
-      if (stagnantCount >= maxStagnantAttempts) {
+    try {
+      // Check if we're still on the correct page
+      const currentUrl = page.url();
+      if (!currentUrl.includes(baseUrl.split("?")[0])) {
         logProgress(
           "URL_COLLECTION",
-          `No new content after ${maxStagnantAttempts} attempts. Stopping at ${allProductUrls.size} URLs.`
+          `Page navigated away to ${currentUrl}. Stopping.`
         );
         break;
       }
-    } else {
-      stagnantCount = 0;
-    }
 
-    previousHeight = currentHeight;
+      const currentUrls = await page.evaluate(() => {
+        const productElements = document.querySelectorAll(
+          ".p-card-chldrn-cntnr.card-border a"
+        );
+        return Array.from(productElements)
+          .map((element) => element.getAttribute("href"))
+          .filter((url) => url && !url.includes("javascript:"));
+      });
 
-    const atBottom = await page.evaluate(() => {
-      return window.scrollY + window.innerHeight >= document.body.scrollHeight;
-    });
-    if (atBottom && allProductUrls.size === previousSize) {
+      const previousSize = allProductUrls.size;
+      currentUrls.forEach((url) => {
+        const absoluteUrl = url.startsWith("http")
+          ? url
+          : new URL(url, "https://www.trendyol.com").href;
+        allProductUrls.add(absoluteUrl);
+      });
+
       logProgress(
         "URL_COLLECTION",
-        "Reached page bottom with no new URLs. Stopping."
+        `Found ${allProductUrls.size} unique URLs so far...`
       );
-      break;
+
+      if (!isIndeterminate && allProductUrls.size >= totalProducts) {
+        logProgress(
+          "URL_COLLECTION",
+          `Collected sufficient products (${allProductUrls.size}/${totalProducts}).`
+        );
+        break;
+      }
+
+      // Scroll and wait for new content
+      await page.evaluate(() => window.scrollBy(0, 1000));
+      await delay(2000);
+
+      // Wait for new product cards to appear (optional robustness)
+      await page
+        .waitForFunction(
+          (prevSize) =>
+            document.querySelectorAll(".p-card-chldrn-cntnr.card-border")
+              .length > prevSize,
+          { timeout: 10000 },
+          previousSize
+        )
+        .catch(() => {
+          logProgress(
+            "URL_COLLECTION",
+            "No new product cards detected after scroll."
+          );
+        });
+
+      const currentHeight = await page.evaluate(
+        () => document.body.scrollHeight
+      );
+
+      if (currentHeight === previousHeight) {
+        stagnantCount++;
+        logProgress(
+          "URL_COLLECTION",
+          `No height change detected (attempt ${stagnantCount}/${maxStagnantAttempts})`
+        );
+        if (stagnantCount >= maxStagnantAttempts) {
+          logProgress(
+            "URL_COLLECTION",
+            `No new content after ${maxStagnantAttempts} attempts. Stopping at ${allProductUrls.size} URLs.`
+          );
+          break;
+        }
+      } else {
+        stagnantCount = 0;
+      }
+
+      previousHeight = currentHeight;
+
+      const atBottom = await page.evaluate(() => {
+        return (
+          window.scrollY + window.innerHeight >= document.body.scrollHeight
+        );
+      });
+      if (atBottom && allProductUrls.size === previousSize) {
+        logProgress(
+          "URL_COLLECTION",
+          "Reached page bottom with no new URLs. Stopping."
+        );
+        break;
+      }
+    } catch (error) {
+      console.error(`Error during URL extraction: ${error.message}`);
+      if (
+        error.message.includes("Execution context was destroyed") ||
+        error.message.includes("Navigation")
+      ) {
+        logProgress(
+          "URL_COLLECTION",
+          "Context destroyed, attempting to recover..."
+        );
+        await delay(2000); // Wait before retrying
+        continue; // Retry the loop
+      } else {
+        throw error; // Re-throw unexpected errors
+      }
     }
   }
 
@@ -149,13 +197,12 @@ const extractProductUrls = async (page, baseUrl) => {
 };
 
 // Scrape product details from individual product page
-// Scrape product details from individual product page
 const scrapeProductDetails = async (page, url) => {
   try {
     logProgress("DETAIL", `Scraping details from: ${url}`);
     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-    // Optional: Click on the first gallery thumbnail to load full-size images in the modal
+    // Optional: Click on the first gallery thumbnail to load full-size images
     await page.evaluate(() => {
       const firstThumbnail = document.querySelector(
         ".product-slide.thumbnail-feature img"
@@ -164,49 +211,42 @@ const scrapeProductDetails = async (page, url) => {
         firstThumbnail.click();
       }
     });
-    await delay(1000); // Wait for the modal/gallery to load
+    await delay(1000);
 
     const productDetails = await page.evaluate(() => {
       const imageSources = new Set();
 
-      // 1. Main product image (often full-size or close to it)
       const mainImage = document.querySelector(".base-product-image img");
       if (mainImage) {
         let src = mainImage.getAttribute("src");
-        // Replace size parameters in URL (e.g., 800x800 to original or larger)
         if (src && src.includes("800x800")) {
-          src = src.replace(/(\d+x\d+)/, ""); // Attempt to get original size
+          src = src.replace(/(\d+x\d+)/, "");
         }
         if (src) imageSources.add(src);
       }
 
-      // 2. Gallery modal images (typically full-size)
       const modalImages = document.querySelectorAll(".gallery-modal img");
       modalImages.forEach((img) => {
         let src = img.getAttribute("src");
         if (src && src.includes("thumbnail")) {
-          src = src.replace("thumbnail", ""); // Remove thumbnail keyword if present
+          src = src.replace("thumbnail", "");
         }
         if (src) imageSources.add(src);
       });
 
-      // 3. Fallback: Slider images with URL transformation
       const sliderImages = document.querySelectorAll(
         ".product-slide.thumbnail-feature img"
       );
       sliderImages.forEach((img) => {
         let src = img.getAttribute("src");
         if (src) {
-          // Trendyol often uses size suffixes like "100x100" or "800x800"
-          src = src.replace(/(\d+x\d+)/, ""); // Attempt to request original size
+          src = src.replace(/(\d+x\d+)/, "");
           imageSources.add(src);
         }
       });
 
-      // Convert Set to string with semicolon separator
       const images = Array.from(imageSources).join(";");
 
-      // Rest of the existing evaluation logic...
       const brandElement = document.querySelector(
         "span.product-description-market-place"
       );
