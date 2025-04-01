@@ -24,17 +24,41 @@ const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
-// Launch browser with retry logic
+// Launch browser with retry logic and dynamic screen size
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       if (browser && browser.isConnected()) return browser;
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
+
+      // Launch browser initially with default settings
       browser = await puppeteer.launch({
-        headless: false, // Set to true for production
+        headless: false, // Visible window to match screen size
         protocolTimeout: 86400000, // 24-hour timeout
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--start-maximized"],
       });
+
+      // Open a temporary page to get screen dimensions
+      const tempPage = await browser.newPage();
+      const screenSize = await tempPage.evaluate(() => {
+        return {
+          width: window.screen.width,
+          height: window.screen.height,
+        };
+      });
+      await tempPage.close();
+
+      logProgress(
+        "BROWSER",
+        `Detected screen size: ${screenSize.width}x${screenSize.height}`
+      );
+
+      // Set default viewport to match screen size
+      await browser.defaultViewport({
+        width: screenSize.width,
+        height: screenSize.height,
+      });
+
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
@@ -395,10 +419,7 @@ const scrapeAmazonUrls = async () => {
       }
 
       const page = await browser.newPage();
-      await page.setViewport({ width: 1366, height: 768 });
-      await page.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
+      // Viewport is already set to screen size during launch, no need to set again here
 
       // Collect all product URLs across pages
       const productUrls = await extractProductUrls(page, baseUrl);
@@ -410,10 +431,7 @@ const scrapeAmazonUrls = async () => {
       );
 
       const productPage = await browser.newPage();
-      await productPage.setViewport({ width: 1366, height: 768 });
-      await productPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
+      // Viewport is already set to screen size during launch
 
       for (const url of productUrls) {
         if (processedUrls.has(url)) {

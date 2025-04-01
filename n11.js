@@ -2,7 +2,19 @@ const puppeteer = require("puppeteer");
 const cheerio = require("cheerio");
 const fs = require("fs");
 const path = require("path");
-const axios = require("axios");
+const axios = require("axios").default;
+
+const port = 33335;
+const session_id = (1000000 * Math.random()) | 0;
+const options = {
+  auth: {
+    username: `brd-customer-hl_7930d613-zone-davutbey-session-${session_id}`,
+    password: "3wa371vuwi2e",
+  },
+  host: "brd.superproxy.io",
+  port,
+  rejectUnauthorized: false,
+};
 
 let browser;
 let shouldStop = false;
@@ -67,12 +79,14 @@ const launchBrowser = async (retries = 3) => {
     try {
       if (browser && browser.isConnected()) return browser;
       browser = await puppeteer.launch({
-        headless: true, // Headless mode for free proxies
+        headless: true,
+        protocolTimeout: 120000, // Increased to 120 seconds
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
       });
+      console.log("Browser launched successfully");
       return browser;
     } catch (error) {
-      console.error(`Browser launch attempt ${i + 1} failed:`, error);
+      console.error(`Browser launch attempt ${i + 1} failed:`, error.message);
       if (i === retries - 1) throw error;
       await delay(2000);
     }
@@ -106,7 +120,7 @@ const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
     console.log(`Scraping page ${currentPage}: ${pageUrl}`);
 
     try {
-      await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 60000 });
+      await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
       await delay(5000);
 
       const html = await page.content();
@@ -157,20 +171,11 @@ const scrapeProductDetails = async (browser, url, retries = 3) => {
   for (let i = 0; i < retries; i++) {
     let page;
     try {
-      const proxy = getNextProxy();
-      if (!proxy) throw new Error("No available proxies");
-      const proxyArg = `--proxy-server=${proxy.host}:${proxy.port}`;
       console.log(
-        `Scraping product with proxy ${proxy.host}:${proxy.port}: ${url}`
+        `Scraping product with proxy ${options.host}:${options.port}: ${url}`
       );
-
-      page = await browser.newPage();
-      await page.setExtraHTTPHeaders({
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-      });
-
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+      const response = await axios.get(url, options);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
       await delay(3000);
 
       const html = await page.content();
@@ -261,14 +266,19 @@ const scrapeProductDetails = async (browser, url, retries = 3) => {
           error: error.message,
         };
       }
-      await delay(5000); // Wait before retrying with a new proxy
+      await delay(5000 * (i + 1)); // Exponential backoff
     }
   }
 };
 
 // Save products to file
 const saveProductsToFile = (products, filePath) => {
-  fs.writeFileSync(filePath, JSON.stringify(products, null, 2));
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(products, null, 2));
+    console.log(`Saved products to ${filePath}`);
+  } catch (error) {
+    console.error(`Failed to save products to ${filePath}:`, error.message);
+  }
 };
 
 // Load existing products
@@ -357,14 +367,28 @@ const scrapeMultipleUrls = async () => {
           continue;
         }
 
-        const details = await scrapeProductDetails(browser, productUrl);
-        productsArray.push(details);
-        processedUrls.add(productUrl);
-        saveProductsToFile(productsArray, outputFileName);
-        console.log(
-          `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
-        );
-        await delay(Math.random() * 5000 + 2000); // Random delay between 2-7 seconds
+        const productPage = await browser.newPage();
+        try {
+          const details = await scrapeProductDetails(productPage, productUrl);
+          productsArray.push(details);
+          processedUrls.add(productUrl);
+          saveProductsToFile(productsArray, outputFileName);
+          console.log(
+            `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
+          );
+        } catch (error) {
+          console.error(`Failed to scrape ${productUrl}:`, error.message);
+        } finally {
+          try {
+            await productPage.close();
+          } catch (closeError) {
+            console.error(
+              `Failed to close page for ${productUrl}:`,
+              closeError.message
+            );
+          }
+        }
+        await delay(2000);
       }
 
       while (totalProducts > 0 && processedUrls.size < totalProducts - 1) {
@@ -381,14 +405,26 @@ const scrapeMultipleUrls = async () => {
 
         for (const productUrl of newUrls) {
           if (processedUrls.has(productUrl)) continue;
-          const details = await scrapeProductDetails(browser, productUrl);
-          productsArray.push(details);
-          processedUrls.add(productUrl);
-          saveProductsToFile(productsArray, outputFileName);
-          console.log(
-            `Retry Progress: ${productsArray.length}/${totalProducts}`
-          );
-          await delay(Math.random() * 5000 + 2000);
+          const productPage = await browser.newPage();
+          try {
+            const details = await scrapeProductDetails(productPage, productUrl);
+            productsArray.push(details);
+            processedUrls.add(productUrl);
+            saveProductsToFile(productsArray, outputFileName);
+            console.log(
+              `Retry Progress: ${productsArray.length}/${totalProducts}`
+            );
+          } finally {
+            try {
+              await productPage.close();
+            } catch (closeError) {
+              console.error(
+                `Failed to close retry page for ${productUrl}:`,
+                closeError.message
+              );
+            }
+          }
+          await delay(2000);
         }
       }
 
