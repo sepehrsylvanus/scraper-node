@@ -8,7 +8,6 @@ if (!fs.existsSync(outputDir)) {
 }
 
 let browser;
-let shouldStop = false;
 
 const today = new Date();
 const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
@@ -24,7 +23,17 @@ const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
-// Launch browser with retry logic, dynamic screen size, and user-agent
+// Randomize user-agent
+const getRandomUserAgent = () => {
+  const userAgents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
+  ];
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+};
+
+// Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
@@ -32,8 +41,8 @@ const launchBrowser = async (retries = 3) => {
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
 
       browser = await puppeteer.launch({
-        headless: false, // Visible window for debugging
-        protocolTimeout: 86400000, // 24-hour timeout
+        headless: false, // Visible for debugging
+        protocolTimeout: 86400000,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
@@ -44,183 +53,22 @@ const launchBrowser = async (retries = 3) => {
       });
 
       const tempPage = await browser.newPage();
-      // Set a realistic user-agent to avoid detection
-      await tempPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
-
-      const screenSize = await tempPage.evaluate(() => {
-        return {
-          width: window.screen.width,
-          height: window.screen.height,
-        };
-      });
+      await tempPage.setUserAgent(getRandomUserAgent());
       await tempPage.close();
 
-      logProgress(
-        "BROWSER",
-        `Detected screen size: ${screenSize.width}x${screenSize.height}`
-      );
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
       if (i === retries - 1) throw error;
-      await delay(2000);
+      await delay(1000);
     }
   }
-};
-
-// Extract product URLs from Amazon search results page
-const extractProductUrls = async (page, baseUrl) => {
-  logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
-  let allProductUrls = new Set();
-  let currentPage = 1;
-  const maxPages = 10;
-
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-  );
-
-  while (!shouldStop && currentPage <= maxPages) {
-    const currentUrl =
-      currentPage === 1 ? baseUrl : `${baseUrl}&page=${currentPage}`;
-    logProgress(
-      "URL_COLLECTION",
-      `Navigating to page ${currentPage}: ${currentUrl}`
-    );
-
-    try {
-      const response = await page.goto(currentUrl, {
-        waitUntil: "networkidle2",
-        timeout: 60000,
-      });
-
-      // Log the final URL after redirects
-      const finalUrl = response.url();
-      logProgress("URL_COLLECTION", `Landed on: ${finalUrl}`);
-
-      const currentUrls = await page.evaluate(() => {
-        const productElements = document.querySelectorAll(
-          ".s-result-item.s-asin .s-product-image-container a.a-link-normal"
-        );
-        return Array.from(productElements)
-          .map((element) => element.getAttribute("href"))
-          .filter((url) => url && !url.includes("javascript:"));
-      });
-
-      currentUrls.forEach((url) => {
-        const absoluteUrl = url.startsWith("http")
-          ? url
-          : new URL(url, "https://www.amazon.com.tr").href;
-        allProductUrls.add(absoluteUrl);
-      });
-
-      logProgress(
-        "URL_COLLECTION",
-        `Found ${allProductUrls.size} unique URLs so far...`
-      );
-
-      const hasNextPage = await page.evaluate(() => {
-        const nextButton = document.querySelector(
-          ".s-pagination-container .s-pagination-next"
-        );
-        return (
-          nextButton &&
-          !nextButton.classList.contains("s-pagination-disabled") &&
-          !nextButton.getAttribute("aria-disabled")
-        );
-      });
-
-      if (!hasNextPage) {
-        logProgress(
-          "URL_COLLECTION",
-          "No enabled 'Next' button found or last page reached. Stopping."
-        );
-        break;
-      }
-
-      logProgress(
-        "URL_COLLECTION",
-        `Attempting to move to page ${currentPage + 1}...`
-      );
-
-      const navigationPromise = page.evaluate(() => {
-        const nextButton = document.querySelector(
-          ".s-pagination-container .s-pagination-next"
-        );
-        if (nextButton) {
-          nextButton.click();
-          return true;
-        }
-        return false;
-      });
-
-      const clicked = await navigationPromise;
-      if (!clicked) {
-        logProgress("URL_COLLECTION", "Next button not clickable. Stopping.");
-        break;
-      }
-
-      try {
-        await page.waitForNavigation({
-          waitUntil: "networkidle2",
-          timeout: 60000,
-        });
-      } catch (navError) {
-        logProgress(
-          "URL_COLLECTION",
-          `Navigation timeout on page ${currentPage + 1}: ${
-            navError.message
-          }. Attempting to continue...`
-        );
-        currentPage++;
-        continue;
-      }
-
-      currentPage++;
-      await delay(2000);
-    } catch (error) {
-      logProgress(
-        "URL_COLLECTION",
-        `Error on page ${currentPage}: ${error.message}. Stopping pagination.`
-      );
-      break;
-    }
-  }
-
-  return Array.from(allProductUrls);
 };
 
 // Scrape product details from individual product page
 const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-  );
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-
-  try {
-    await page.waitForSelector("#acrPopover", { timeout: 10000 });
-    logProgress("PRODUCT_SCRAPING", "Rating section found.");
-  } catch (error) {
-    logProgress("PRODUCT_SCRAPING", "Rating section not found.");
-  }
-
-  try {
-    await page.waitForSelector("#productDetails_techSpec_section_1", {
-      timeout: 10000,
-    });
-    logProgress("PRODUCT_SCRAPING", "Specifications table found.");
-  } catch (error) {
-    logProgress("PRODUCT_SCRAPING", "Specifications table not found.");
-  }
-
-  try {
-    await page.waitForSelector("#feature-bullets", { timeout: 10000 });
-    logProgress("PRODUCT_SCRAPING", "Feature bullets section found.");
-  } catch (error) {
-    logProgress("PRODUCT_SCRAPING", "Feature bullets section not found.");
-  }
+  await page.goto(url, { waitUntil: "networkidle0", timeout: 60000 });
 
   const productData = await page.evaluate(() => {
     let price = null;
@@ -382,11 +230,96 @@ const loadExistingUrls = (baseUrl, dir) => {
   return existingUrls;
 };
 
+// Scrape the exact page provided
+const scrapeSinglePage = async (
+  page,
+  baseUrl,
+  processedUrls,
+  productDataArray,
+  outputFileName
+) => {
+  logProgress("PAGE_SCRAPING", `Navigating to: ${baseUrl}`);
+
+  try {
+    const response = await page.goto(baseUrl, {
+      waitUntil: "networkidle0",
+      timeout: 60000,
+    });
+    const finalUrl = response.url();
+    logProgress("PAGE_SCRAPING", `Landed on: ${finalUrl}`);
+
+    // Wait for product list to load
+    await page.waitForSelector(".s-result-item", { timeout: 10000 });
+    logProgress("PAGE_SCRAPING", "Product list loaded.");
+
+    // Extract product URLs on the page
+    const currentUrls = await page.evaluate(() => {
+      const productElements = document.querySelectorAll(
+        ".s-result-item[data-asin] .a-link-normal.s-no-outline"
+      );
+      return Array.from(productElements)
+        .map((element) => element.getAttribute("href"))
+        .filter(
+          (url) => url && !url.includes("javascript:") && url.includes("/dp/")
+        );
+    });
+
+    const productUrls = currentUrls.map((url) =>
+      url.startsWith("http")
+        ? url
+        : new URL(url, "https://www.amazon.com.tr").href
+    );
+
+    logProgress(
+      "PAGE_SCRAPING",
+      `Found ${productUrls.length} product URLs on the page`
+    );
+
+    // Scrape each product on the page
+    for (const url of productUrls) {
+      if (processedUrls.has(url)) {
+        logProgress("PAGE_SCRAPING", `Skipping already processed URL: ${url}`);
+        continue;
+      }
+
+      try {
+        const productData = await scrapeProductDetails(page, url);
+        productDataArray.push(productData);
+        logProgress(
+          "PAGE_SCRAPING",
+          `Scraped details for ${url}: Price=${productData.price}, Currency=${productData.currency}`
+        );
+        saveUrlsToFile(productDataArray, outputFileName);
+        processedUrls.add(url);
+      } catch (error) {
+        console.error(`Failed to scrape ${url}:`, error);
+        productDataArray.push({
+          url,
+          productId: "",
+          brand: "",
+          title: "",
+          price: null,
+          currency: "",
+          images: "",
+          rating: null,
+          specifications: [],
+          categories: "",
+          description: "",
+        });
+        saveUrlsToFile(productDataArray, outputFileName);
+      }
+      await delay(500);
+    }
+  } catch (error) {
+    logProgress("PAGE_SCRAPING", `Error scraping page: ${error.message}`);
+  }
+};
+
 // Main scraping function
 const scrapeAmazonUrls = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
-    console.error("Usage: node script.js <url1> <url2> ...");
+    console.error("Usage: node script.js <url>");
     process.exit(1);
   }
 
@@ -397,7 +330,7 @@ const scrapeAmazonUrls = async () => {
     const browser = await launchBrowser();
 
     for (const baseUrl of urls) {
-      logProgress("MAIN", `Processing base URL: ${baseUrl}`);
+      logProgress("MAIN", `Processing URL: ${baseUrl}`);
       let processedUrls = loadExistingUrls(baseUrl, amazonDir);
       let productDataArray = [];
 
@@ -429,53 +362,21 @@ const scrapeAmazonUrls = async () => {
       }
 
       const page = await browser.newPage();
+      await page.setUserAgent(getRandomUserAgent());
+      await page.setExtraHTTPHeaders({
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      });
 
-      // Collect all product URLs across pages
-      const productUrls = await extractProductUrls(page, baseUrl);
-      await page.close();
-
-      logProgress(
-        "MAIN",
-        `Found ${productUrls.length} product URLs across all pages`
+      await scrapeSinglePage(
+        page,
+        baseUrl,
+        processedUrls,
+        productDataArray,
+        outputFileName
       );
-
-      const productPage = await browser.newPage();
-
-      for (const url of productUrls) {
-        if (processedUrls.has(url)) {
-          logProgress("MAIN", `Skipping already processed URL: ${url}`);
-          continue;
-        }
-
-        try {
-          const productData = await scrapeProductDetails(productPage, url);
-          productDataArray.push(productData);
-          logProgress(
-            "MAIN",
-            `Scraped details for ${url}: Price=${productData.price}, Currency=${productData.currency}`
-          );
-          saveUrlsToFile(productDataArray, outputFileName);
-        } catch (error) {
-          console.error(`Failed to scrape ${url}:`, error);
-          productDataArray.push({
-            url,
-            productId: "",
-            brand: "",
-            title: "",
-            price: null,
-            currency: "",
-            images: "",
-            rating: null,
-            specifications: [],
-            categories: "",
-            description: "",
-          });
-          saveUrlsToFile(productDataArray, outputFileName);
-        }
-        await delay(1000);
-      }
-
-      await productPage.close();
+      await page.close();
 
       logProgress(
         "MAIN",
