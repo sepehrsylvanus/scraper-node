@@ -24,22 +24,31 @@ const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
-// Launch browser with retry logic and dynamic screen size
+// Launch browser with retry logic, dynamic screen size, and user-agent
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       if (browser && browser.isConnected()) return browser;
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
 
-      // Launch browser initially with default settings
       browser = await puppeteer.launch({
-        headless: false, // Visible window to match screen size
+        headless: false, // Visible window for debugging
         protocolTimeout: 86400000, // 24-hour timeout
-        args: ["--no-sandbox", "--disable-setuid-sandbox", "--start-maximized"],
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--start-maximized",
+          "--disable-web-security",
+          "--disable-features=IsolateOrigins,site-per-process",
+        ],
       });
 
-      // Open a temporary page to get screen dimensions
       const tempPage = await browser.newPage();
+      // Set a realistic user-agent to avoid detection
+      await tempPage.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+      );
+
       const screenSize = await tempPage.evaluate(() => {
         return {
           width: window.screen.width,
@@ -52,13 +61,6 @@ const launchBrowser = async (retries = 3) => {
         "BROWSER",
         `Detected screen size: ${screenSize.width}x${screenSize.height}`
       );
-
-      // Set default viewport to match screen size
-      await browser.defaultViewport({
-        width: screenSize.width,
-        height: screenSize.height,
-      });
-
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
@@ -73,7 +75,11 @@ const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
   let currentPage = 1;
-  const maxPages = 10; // Safety limit to prevent infinite loops
+  const maxPages = 10;
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+  );
 
   while (!shouldStop && currentPage <= maxPages) {
     const currentUrl =
@@ -84,10 +90,14 @@ const extractProductUrls = async (page, baseUrl) => {
     );
 
     try {
-      await page.goto(currentUrl, {
+      const response = await page.goto(currentUrl, {
         waitUntil: "networkidle2",
         timeout: 60000,
       });
+
+      // Log the final URL after redirects
+      const finalUrl = response.url();
+      logProgress("URL_COLLECTION", `Landed on: ${finalUrl}`);
 
       const currentUrls = await page.evaluate(() => {
         const productElements = document.querySelectorAll(
@@ -110,7 +120,6 @@ const extractProductUrls = async (page, baseUrl) => {
         `Found ${allProductUrls.size} unique URLs so far...`
       );
 
-      // Check for next page with more robust logic
       const hasNextPage = await page.evaluate(() => {
         const nextButton = document.querySelector(
           ".s-pagination-container .s-pagination-next"
@@ -135,7 +144,6 @@ const extractProductUrls = async (page, baseUrl) => {
         `Attempting to move to page ${currentPage + 1}...`
       );
 
-      // More robust navigation attempt
       const navigationPromise = page.evaluate(() => {
         const nextButton = document.querySelector(
           ".s-pagination-container .s-pagination-next"
@@ -165,13 +173,12 @@ const extractProductUrls = async (page, baseUrl) => {
             navError.message
           }. Attempting to continue...`
         );
-        // Try direct URL navigation as fallback
         currentPage++;
         continue;
       }
 
       currentPage++;
-      await delay(2000); // Polite delay between page loads
+      await delay(2000);
     } catch (error) {
       logProgress(
         "URL_COLLECTION",
@@ -187,6 +194,9 @@ const extractProductUrls = async (page, baseUrl) => {
 // Scrape product details from individual product page
 const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+  );
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
   try {
@@ -419,7 +429,6 @@ const scrapeAmazonUrls = async () => {
       }
 
       const page = await browser.newPage();
-      // Viewport is already set to screen size during launch, no need to set again here
 
       // Collect all product URLs across pages
       const productUrls = await extractProductUrls(page, baseUrl);
@@ -431,7 +440,6 @@ const scrapeAmazonUrls = async () => {
       );
 
       const productPage = await browser.newPage();
-      // Viewport is already set to screen size during launch
 
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
@@ -446,7 +454,7 @@ const scrapeAmazonUrls = async () => {
             "MAIN",
             `Scraped details for ${url}: Price=${productData.price}, Currency=${productData.currency}`
           );
-          saveUrlsToFile(productDataArray, outputFileName); // Save after each product
+          saveUrlsToFile(productDataArray, outputFileName);
         } catch (error) {
           console.error(`Failed to scrape ${url}:`, error);
           productDataArray.push({
@@ -464,7 +472,7 @@ const scrapeAmazonUrls = async () => {
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(1000); // Polite delay
+        await delay(1000);
       }
 
       await productPage.close();
