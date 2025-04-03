@@ -24,6 +24,18 @@ const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
+// Random user agents
+const getRandomUserAgent = () => {
+  const userAgents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+  ];
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+};
+
 // Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
@@ -31,9 +43,13 @@ const launchBrowser = async (retries = 3) => {
       if (browser && browser.isConnected()) return browser;
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false, // Set to true for production if needed
-        protocolTimeout: 86400000, // 24-hour timeout
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        headless: false,
+        protocolTimeout: 86400000,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+        ],
       });
       return browser;
     } catch (error) {
@@ -44,30 +60,23 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs from Trendyol listing page with retries
+// Extract product URLs from Trendyol listing page
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting scrape for: ${baseUrl}`);
+  await page.setUserAgent(getRandomUserAgent());
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
   const totalProductsInfo = await page.evaluate(() => {
     const descElement = document.querySelector(".dscrptn.dscrptn-V2 h2");
-    if (descElement) {
-      const text = descElement.textContent.trim();
-      const match = text.match(/([\d.]+)(\+)?\s+sonuç/);
-      if (match) {
-        const number = parseFloat(match[1].replace(".", ""));
-        return { count: number, isPlus: !!match[2] };
-      }
-    }
-    return { count: 0, isPlus: false };
+    return descElement
+      ? descElement.textContent
+          .trim()
+          .match(/([\d.]+)(\+)?\s+sonuç/)
+          ?.slice(1)
+      : [0, false];
   });
-
-  const totalProducts = totalProductsInfo.count;
-  const isIndeterminate = totalProductsInfo.isPlus;
-  logProgress(
-    "URL_COLLECTION",
-    `Total products expected: ${totalProducts}${isIndeterminate ? "+" : ""}`
-  );
+  const totalProducts = parseFloat(totalProductsInfo[0]?.replace(".", "") || 0);
+  const isIndeterminate = !!totalProductsInfo[1];
 
   let allProductUrls = new Set();
   let previousHeight = 0;
@@ -76,116 +85,54 @@ const extractProductUrls = async (page, baseUrl) => {
 
   while (!shouldStop) {
     try {
-      // Check if we're still on the correct page
-      const currentUrl = page.url();
-      if (!currentUrl.includes(baseUrl.split("?")[0])) {
-        logProgress(
-          "URL_COLLECTION",
-          `Page navigated away to ${currentUrl}. Stopping.`
-        );
-        break;
-      }
-
       const currentUrls = await page.evaluate(() => {
-        const productElements = document.querySelectorAll(
-          ".p-card-chldrn-cntnr.card-border a"
-        );
-        return Array.from(productElements)
-          .map((element) => element.getAttribute("href"))
-          .filter((url) => url && !url.includes("javascript:"));
+        return Array.from(
+          document.querySelectorAll(".p-card-chldrn-cntnr.card-border a")
+        )
+          .map((el) => el.getAttribute("href"))
+          .filter((url) => url && !url.includes("javascript:"))
+          .map((url) =>
+            url.startsWith("http")
+              ? url
+              : new URL(url, "https://www.trendyol.com").href
+          );
       });
 
-      const previousSize = allProductUrls.size;
-      currentUrls.forEach((url) => {
-        const absoluteUrl = url.startsWith("http")
-          ? url
-          : new URL(url, "https://www.trendyol.com").href;
-        allProductUrls.add(absoluteUrl);
-      });
-
+      currentUrls.forEach((url) => allProductUrls.add(url));
       logProgress(
         "URL_COLLECTION",
         `Found ${allProductUrls.size} unique URLs so far...`
       );
 
-      if (!isIndeterminate && allProductUrls.size >= totalProducts) {
-        logProgress(
-          "URL_COLLECTION",
-          `Collected sufficient products (${allProductUrls.size}/${totalProducts}).`
-        );
-        break;
-      }
+      if (!isIndeterminate && allProductUrls.size >= totalProducts) break;
 
-      // Scroll and wait for new content
       await page.evaluate(() => window.scrollBy(0, 1000));
       await delay(2000);
-
-      // Wait for new product cards to appear (optional robustness)
-      await page
-        .waitForFunction(
-          (prevSize) =>
-            document.querySelectorAll(".p-card-chldrn-cntnr.card-border")
-              .length > prevSize,
-          { timeout: 10000 },
-          previousSize
-        )
-        .catch(() => {
-          logProgress(
-            "URL_COLLECTION",
-            "No new product cards detected after scroll."
-          );
-        });
 
       const currentHeight = await page.evaluate(
         () => document.body.scrollHeight
       );
-
       if (currentHeight === previousHeight) {
         stagnantCount++;
-        logProgress(
-          "URL_COLLECTION",
-          `No height change detected (attempt ${stagnantCount}/${maxStagnantAttempts})`
-        );
-        if (stagnantCount >= maxStagnantAttempts) {
-          logProgress(
-            "URL_COLLECTION",
-            `No new content after ${maxStagnantAttempts} attempts. Stopping at ${allProductUrls.size} URLs.`
-          );
-          break;
-        }
+        if (stagnantCount >= maxStagnantAttempts) break;
       } else {
         stagnantCount = 0;
       }
-
       previousHeight = currentHeight;
 
-      const atBottom = await page.evaluate(() => {
-        return (
-          window.scrollY + window.innerHeight >= document.body.scrollHeight
-        );
-      });
-      if (atBottom && allProductUrls.size === previousSize) {
-        logProgress(
-          "URL_COLLECTION",
-          "Reached page bottom with no new URLs. Stopping."
-        );
-        break;
-      }
-    } catch (error) {
-      console.error(`Error during URL extraction: ${error.message}`);
       if (
-        error.message.includes("Execution context was destroyed") ||
-        error.message.includes("Navigation")
-      ) {
-        logProgress(
-          "URL_COLLECTION",
-          "Context destroyed, attempting to recover..."
-        );
-        await delay(2000); // Wait before retrying
-        continue; // Retry the loop
-      } else {
-        throw error; // Re-throw unexpected errors
-      }
+        await page.evaluate(
+          () =>
+            window.scrollY + window.innerHeight >= document.body.scrollHeight
+        )
+      )
+        break;
+    } catch (error) {
+      logProgress(
+        "URL_COLLECTION",
+        `Error: ${error.message}. Attempting to recover...`
+      );
+      await delay(2000);
     }
   }
 
@@ -196,116 +143,68 @@ const extractProductUrls = async (page, baseUrl) => {
   };
 };
 
-// Scrape product details from individual product page
+// Scrape product details with improved error handling
 const scrapeProductDetails = async (page, url) => {
   try {
-    logProgress("DETAIL", `Scraping details from: ${url}`);
+    await page.setUserAgent(getRandomUserAgent());
     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-
-    // Optional: Click on the first gallery thumbnail to load full-size images
-    await page.evaluate(() => {
-      const firstThumbnail = document.querySelector(
-        ".product-slide.thumbnail-feature img"
-      );
-      if (firstThumbnail) {
-        firstThumbnail.click();
-      }
-    });
-    await delay(1000);
 
     const productDetails = await page.evaluate(() => {
       const imageSources = new Set();
+      document
+        .querySelectorAll(
+          ".base-product-image img, .gallery-modal img, .product-slide.thumbnail-feature img"
+        )
+        .forEach((img) => {
+          let src =
+            img.getAttribute("src")?.replace(/(\d+x\d+|thumbnail)/g, "") || "";
+          if (src) imageSources.add(src);
+        });
 
-      const mainImage = document.querySelector(".base-product-image img");
-      if (mainImage) {
-        let src = mainImage.getAttribute("src");
-        if (src && src.includes("800x800")) {
-          src = src.replace(/(\d+x\d+)/, "");
-        }
-        if (src) imageSources.add(src);
-      }
+      const brand =
+        document
+          .querySelector("span.product-description-market-place")
+          ?.textContent.trim() || null;
+      const title =
+        document.querySelector("h3.detail-name")?.textContent.trim() || null;
 
-      const modalImages = document.querySelectorAll(".gallery-modal img");
-      modalImages.forEach((img) => {
-        let src = img.getAttribute("src");
-        if (src && src.includes("thumbnail")) {
-          src = src.replace("thumbnail", "");
-        }
-        if (src) imageSources.add(src);
-      });
-
-      const sliderImages = document.querySelectorAll(
-        ".product-slide.thumbnail-feature img"
-      );
-      sliderImages.forEach((img) => {
-        let src = img.getAttribute("src");
-        if (src) {
-          src = src.replace(/(\d+x\d+)/, "");
-          imageSources.add(src);
-        }
-      });
-
-      const images = Array.from(imageSources).join(";");
-
-      const brandElement = document.querySelector(
-        "span.product-description-market-place"
-      );
-      const brand = brandElement ? brandElement.textContent.trim() : null;
-
-      const titleElement = document.querySelector("h3.detail-name");
-      const title = titleElement ? titleElement.textContent.trim() : null;
-
-      const priceElement = document.querySelector("span.prc-dsc");
-      let price = null;
-      let currency = null;
-      if (priceElement) {
-        const priceText = priceElement.textContent.trim();
-        const priceMatch = priceText.match(/([\d.,]+)\s*(\w+)/);
-        if (priceMatch) {
-          price = parseFloat(priceMatch[1].replace(",", "."));
-          currency = priceMatch[2];
-        }
-      }
-
-      const ratingElement = document.querySelector(
-        ".product-rating-score .value"
-      );
-      const rating = ratingElement
-        ? parseFloat(ratingElement.textContent.trim())
+      const priceText =
+        document.querySelector("span.prc-dsc")?.textContent.trim() || "";
+      const priceMatch = priceText.match(/([\d.,]+)\s*(\w+)/);
+      const price = priceMatch
+        ? parseFloat(priceMatch[1].replace(",", "."))
         : null;
+      const currency = priceMatch ? priceMatch[2] : null;
 
-      const specElements = document.querySelectorAll(
-        ".detail-attr-container .detail-attr-item"
-      );
-      const specifications = Array.from(specElements).map((spec) => {
-        const name =
-          spec.querySelector(".attr-key-name-w")?.textContent.trim() || "";
-        const value =
-          spec.querySelector(".attr-value-name-w")?.textContent.trim() || "";
-        return { name, value };
-      });
+      const rating =
+        document
+          .querySelector(".product-rating-score .value")
+          ?.textContent.trim() || null;
 
-      const breadcrumbElements = document.querySelectorAll(
-        ".product-detail-breadcrumb-item span"
-      );
-      const uniqueCategories = new Set(
-        Array.from(breadcrumbElements)
-          .map((el) => el.textContent.trim())
-          .filter((cat) => cat !== "Trendyol" && !cat.includes("Baby Turco"))
-      );
-      const categories = Array.from(uniqueCategories).join(">");
+      const specifications = Array.from(
+        document.querySelectorAll(".detail-attr-container .detail-attr-item")
+      ).map((spec) => ({
+        name: spec.querySelector(".attr-key-name-w")?.textContent.trim() || "",
+        value:
+          spec.querySelector(".attr-value-name-w")?.textContent.trim() || "",
+      }));
 
-      const descriptionElement = document.querySelector(".detail-border");
-      const descriptionHtml = descriptionElement
-        ? descriptionElement.outerHTML
-        : null;
+      const categories = Array.from(
+        document.querySelectorAll(".product-detail-breadcrumb-item span")
+      )
+        .map((el) => el.textContent.trim())
+        .filter((cat) => cat !== "Trendyol" && !cat.includes("Baby Turco"))
+        .join(">");
+
+      const descriptionHtml =
+        document.querySelector(".detail-border")?.outerHTML || null;
 
       return {
         brand,
         title,
         price,
         currency,
-        images,
+        images: Array.from(imageSources).join(";"),
         rating,
         specifications,
         categories,
@@ -313,8 +212,7 @@ const scrapeProductDetails = async (page, url) => {
       };
     });
 
-    const productIdMatch = url.match(/p-(\d+)/);
-    const productId = productIdMatch ? productIdMatch[1] : null;
+    const productId = url.match(/p-(\d+)/)?.[1] || null;
 
     return {
       url,
@@ -324,13 +222,13 @@ const scrapeProductDetails = async (page, url) => {
       price: productDetails.price,
       currency: productDetails.currency,
       images: productDetails.images,
-      rating: productDetails.rating,
+      rating: productDetails.rating ? parseFloat(productDetails.rating) : null,
       specifications: productDetails.specifications,
       categories: productDetails.categories,
       description: productDetails.descriptionHtml,
     };
   } catch (error) {
-    console.error(`Error scraping ${url}:`, error.message);
+    logProgress("DETAIL", `Error scraping ${url}: ${error.message}`);
     return {
       url,
       productId: null,
@@ -363,8 +261,9 @@ const loadExistingProducts = (baseUrl, dir) => {
 
   for (const file of existingFiles) {
     try {
-      const data = fs.readFileSync(path.join(dir, file), "utf8");
-      const products = JSON.parse(data);
+      const products = JSON.parse(
+        fs.readFileSync(path.join(dir, file), "utf8")
+      );
       products.forEach(
         (product) => product.url && existingProducts.add(product.url)
       );
@@ -388,11 +287,11 @@ const scrapeMultipleUrls = async () => {
     if (!fs.existsSync(trendyolDir))
       fs.mkdirSync(trendyolDir, { recursive: true });
 
-    const browser = await launchBrowser();
+    browser = await launchBrowser();
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing: ${baseUrl}`);
-      let processedUrls = loadExistingProducts(baseUrl, trendyolDir);
+      const processedUrls = loadExistingProducts(baseUrl, trendyolDir);
       let productsArray = [];
 
       const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
@@ -408,26 +307,14 @@ const scrapeMultipleUrls = async () => {
 
       const mainPage = await browser.newPage();
       await mainPage.setViewport({ width: 1366, height: 768 });
-      await mainPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
 
-      const { productUrls, totalProducts, isIndeterminate } =
-        await extractProductUrls(mainPage, baseUrl);
+      const { productUrls } = await extractProductUrls(mainPage, baseUrl);
       await mainPage.close();
 
-      logProgress(
-        "MAIN",
-        `Found ${productUrls.length} product URLs out of ${totalProducts}${
-          isIndeterminate ? "+" : ""
-        }`
-      );
+      logProgress("MAIN", `Found ${productUrls.length} product URLs`);
 
       const detailPage = await browser.newPage();
       await detailPage.setViewport({ width: 1366, height: 768 });
-      await detailPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
 
       for (let i = 0; i < productUrls.length && !shouldStop; i++) {
         if (processedUrls.has(productUrls[i])) {
@@ -449,16 +336,21 @@ const scrapeMultipleUrls = async () => {
           `Processed ${i + 1}/${productUrls.length} products`
         );
         saveProductsToFile(productsArray, outputFileName);
-        await delay(1000);
+
+        // Add random delay and recreate page periodically to prevent freezing
+        await delay(1000 + Math.random() * 2000);
+        if (i % 10 === 0 && i > 0) {
+          await detailPage.close();
+          const newDetailPage = await browser.newPage();
+          await newDetailPage.setViewport({ width: 1366, height: 768 });
+          detailPage = newDetailPage;
+        }
       }
 
       await detailPage.close();
-
       logProgress(
         "MAIN",
-        `Completed ${baseUrl}: ${productsArray.length}/${totalProducts}${
-          isIndeterminate ? "+" : ""
-        } products saved to ${outputFileName}`
+        `Completed ${baseUrl}: ${productsArray.length} products saved`
       );
     }
 
