@@ -20,7 +20,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Custom logging function
 const logProgress = (level, message) => {
-  process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
+  console.log(`[${new Date().toISOString()}] [${level}] ${message}`);
 };
 
 // Randomize user-agent
@@ -50,6 +50,7 @@ const launchBrowser = async (retries = 3) => {
           "--disable-web-security",
           "--disable-features=IsolateOrigins,site-per-process",
         ],
+        defaultViewport: null,
       });
 
       const tempPage = await browser.newPage();
@@ -68,7 +69,7 @@ const launchBrowser = async (retries = 3) => {
 // Scrape product details from individual product page
 const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
-  await page.goto(url, { waitUntil: "networkidle0", timeout: 60000 });
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
 
   const productData = await page.evaluate(() => {
     let price = null;
@@ -85,8 +86,7 @@ const scrapeProductDetails = async (page, url) => {
       );
       const fractionPrice = fractionPriceElement.textContent.padStart(2, "0");
       currency = currencyElement.textContent;
-      const priceString = `${wholePriceText}.${fractionPrice}`;
-      price = parseFloat(priceString);
+      price = parseFloat(`${wholePriceText}.${fractionPrice}`);
       if (price > 100) price = price / 1000;
     }
 
@@ -181,11 +181,6 @@ const scrapeProductDetails = async (page, url) => {
     };
   });
 
-  const productIdMatch = url.match(/\/dp\/([A-Z0-9]{10})/);
-  productData.productId = productIdMatch
-    ? productIdMatch[1]
-    : productData.productId;
-
   return {
     url,
     productId: productData.productId,
@@ -248,7 +243,7 @@ const scrapePageByPage = async (
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
   });
 
-  while (!shouldStop && currentPage <= maxPages) {
+  while (currentPage <= maxPages) {
     const currentUrl =
       currentPage === 1 ? baseUrl : `${baseUrl}&page=${currentPage}`;
     logProgress(
@@ -257,41 +252,36 @@ const scrapePageByPage = async (
     );
 
     try {
-      const response = await page.goto(currentUrl, {
-        waitUntil: "networkidle0",
-        timeout: 60000,
+      await page.goto(currentUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
       });
-      const finalUrl = response.url();
-      logProgress("PAGE_SCRAPING", `Landed on: ${finalUrl}`);
+      logProgress("PAGE_SCRAPING", `Loaded page ${currentPage}`);
 
-      // Wait for product list to load
-      await page.waitForSelector(".s-result-item", { timeout: 10000 });
-      logProgress("PAGE_SCRAPING", "Product list loaded.");
+      // Wait for product cards to load
+      await page.waitForSelector(".puis-card-container", { timeout: 10000 });
+      logProgress("PAGE_SCRAPING", "Product cards loaded");
 
-      // Extract product URLs on the current page
-      const currentUrls = await page.evaluate(() => {
-        const productElements = document.querySelectorAll(
-          ".s-result-item[data-asin] .a-link-normal.s-no-outline"
-        );
-        return Array.from(productElements)
-          .map((element) => element.getAttribute("href"))
-          .filter(
-            (url) => url && !url.includes("javascript:") && url.includes("/dp/")
+      // Extract product URLs from the new card structure
+      const productUrls = await page.evaluate(() => {
+        const productCards = document.querySelectorAll(".puis-card-container");
+        return Array.from(productCards)
+          .map((card) => {
+            const link = card.querySelector("a.a-link-normal.s-no-outline");
+            return link ? link.getAttribute("href") : null;
+          })
+          .filter((url) => url && url.includes("/dp/"))
+          .map((url) =>
+            url.startsWith("http") ? url : `https://www.amazon.com.tr${url}`
           );
       });
-
-      const productUrls = currentUrls.map((url) =>
-        url.startsWith("http")
-          ? url
-          : new URL(url, "https://www.amazon.com.tr").href
-      );
 
       logProgress(
         "PAGE_SCRAPING",
         `Found ${productUrls.length} product URLs on page ${currentPage}`
       );
 
-      // Scrape each product on the current page
+      // Scrape each product
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
           logProgress(
@@ -306,12 +296,15 @@ const scrapePageByPage = async (
           productDataArray.push(productData);
           logProgress(
             "PAGE_SCRAPING",
-            `Scraped details for ${url}: Price=${productData.price}, Currency=${productData.currency}`
+            `Scraped ${url}: Price=${productData.price}, Currency=${productData.currency}`
           );
           saveUrlsToFile(productDataArray, outputFileName);
           processedUrls.add(url);
         } catch (error) {
-          console.error(`Failed to scrape ${url}:`, error);
+          logProgress(
+            "PAGE_SCRAPING",
+            `Failed to scrape ${url}: ${error.message}`
+          );
           productDataArray.push({
             url,
             productId: "",
@@ -327,50 +320,45 @@ const scrapePageByPage = async (
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(500);
+        await delay(200);
       }
 
-      // Check for next page
-      const hasNextPage = await page.evaluate(() => {
-        const nextButton = document.querySelector(".s-pagination-next");
-        return (
-          nextButton &&
-          !nextButton.classList.contains("s-pagination-disabled") &&
-          nextButton.getAttribute("aria-disabled") !== "true"
+      // Get the next page URL from the "Sonraki" button in the last <li> of the pagination <ul>
+      const nextPageUrl = await page.evaluate(() => {
+        const paginationList = document.querySelector(
+          "ul.a-unordered-list.a-horizontal.s-unordered-list-accessibility"
         );
+        if (paginationList) {
+          console.log("Pagination list found");
+        }
+        if (paginationList) {
+          // Last <li>
+          const nextButton = page.querySelector(
+            "ul li span.a-list-item a[aria-label^='Sonraki sayfaya git']"
+          );
+          console.log(nextButton);
+          {
+            console.log("Next button found");
+          }
+          if (nextButton) {
+            const href = nextButton.getAttribute("href");
+            return href ? `https://www.amazon.com.tr${href}` : null;
+          }
+        }
+        return null;
       });
 
-      logProgress("PAGE_SCRAPING", `Next page available: ${hasNextPage}`);
-
-      if (!hasNextPage) {
+      if (!nextPageUrl) {
         logProgress(
           "PAGE_SCRAPING",
-          "No enabled 'Next' button found or last page reached. Stopping."
+          "No 'Sonraki' button found in pagination. Stopping."
         );
         break;
       }
 
-      logProgress("PAGE_SCRAPING", `Moving to page ${currentPage + 1}...`);
-      const clicked = await page.evaluate(() => {
-        const nextButton = document.querySelector(".s-pagination-next");
-        if (nextButton) {
-          nextButton.click();
-          return true;
-        }
-        return false;
-      });
-
-      if (!clicked) {
-        logProgress("PAGE_SCRAPING", "Next button not clickable. Stopping.");
-        break;
-      }
-
-      await page.waitForNavigation({
-        waitUntil: "networkidle0",
-        timeout: 60000,
-      });
+      logProgress("PAGE_SCRAPING", `Moving to next page: ${nextPageUrl}`);
       currentPage++;
-      await delay(1000);
+      await delay(500);
     } catch (error) {
       logProgress(
         "PAGE_SCRAPING",
@@ -444,6 +432,7 @@ const scrapeAmazonUrls = async () => {
     }
 
     if (browser) await browser.close();
+    logProgress("MAIN", "Browser closed");
     process.exit(0);
   } catch (error) {
     console.error("[FATAL] Fatal error:", error);
