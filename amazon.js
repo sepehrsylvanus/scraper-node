@@ -69,134 +69,140 @@ const launchBrowser = async (retries = 3) => {
 // Scrape product details from individual product page
 const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-  const productData = await page.evaluate(() => {
-    let price = null;
-    let currency = "";
-    const wholePriceElement = document.querySelector("span.a-price-whole");
-    const fractionPriceElement = document.querySelector(
-      "span.a-price-fraction"
-    );
-    const currencyElement = document.querySelector("span.a-price-symbol");
-    if (wholePriceElement && fractionPriceElement && currencyElement) {
-      const wholePriceText = wholePriceElement.textContent.replace(
-        /[^0-9]/g,
-        ""
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    const productData = await page.evaluate(() => {
+      let price = null;
+      let currency = "";
+      const wholePriceElement = document.querySelector("span.a-price-whole");
+      const fractionPriceElement = document.querySelector(
+        "span.a-price-fraction"
       );
-      const fractionPrice = fractionPriceElement.textContent.padStart(2, "0");
-      currency = currencyElement.textContent;
-      price = parseFloat(`${wholePriceText}.${fractionPrice}`);
-      if (price > 100) price = price / 1000;
-    }
-
-    const productIdMatch = window.location.href.match(/\/dp\/([A-Z0-9]{10})/);
-    const productId = productIdMatch ? productIdMatch[1] : "";
-
-    let brand = "";
-    const techTableRows = document.querySelectorAll(
-      "#productDetails_techSpec_section_1 tr"
-    );
-    for (const row of techTableRows) {
-      const th = row.querySelector("th");
-      const td = row.querySelector("td");
-      if (th && td && th.textContent.trim() === "Marka Adı") {
-        brand = td.textContent.trim().replace("‎", "");
-        break;
+      const currencyElement = document.querySelector("span.a-price-symbol");
+      if (wholePriceElement && fractionPriceElement && currencyElement) {
+        const wholePriceText = wholePriceElement.textContent.replace(
+          /[^0-9]/g,
+          ""
+        );
+        const fractionPrice = fractionPriceElement.textContent.padStart(2, "0");
+        currency = currencyElement.textContent;
+        price = parseFloat(`${wholePriceText}.${fractionPrice}`);
+        if (price > 100) price = price / 1000;
       }
-    }
 
-    const titleElement = document.querySelector("#productTitle");
-    const title = titleElement ? titleElement.textContent.trim() : "";
+      const productIdMatch = window.location.href.match(/\/dp\/([A-Z0-9]{10})/);
+      const productId = productIdMatch ? productIdMatch[1] : "";
 
-    const imageElements = document.querySelectorAll(
-      "#altImages .imageThumbnail img"
-    );
-    const videoElements = document.querySelectorAll(
-      "#altImages .videoThumbnail img"
-    );
-    let allImages = [];
-    imageElements.forEach((img) => {
-      const src = img.getAttribute("src");
-      if (src && !allImages.includes(src)) allImages.push(src);
-    });
-    videoElements.forEach((videoImg) => {
-      const src = videoImg.getAttribute("src");
-      if (src && !allImages.includes(src)) allImages.push(src);
-    });
-    const imagesString = allImages.join(";");
-
-    let rating = null;
-    const ratingElement = document.querySelector(
-      "#acrPopover .a-size-base.a-color-base"
-    );
-    if (ratingElement) {
-      const ratingText = ratingElement.textContent.trim().replace(",", ".");
-      rating = parseFloat(ratingText);
-    }
-
-    const specifications = [];
-    const specRows = document.querySelectorAll(
-      "#productDetails_techSpec_section_1 tr"
-    );
-    specRows.forEach((row) => {
-      const nameElement = row.querySelector("th");
-      const valueElement = row.querySelector("td");
-      if (nameElement && valueElement) {
-        const name = nameElement.textContent.trim();
-        const value = valueElement.textContent.trim().replace("‎", "");
-        specifications.push({ name, value });
-      }
-    });
-
-    const categoryElements = document.querySelectorAll(
-      "ul.a-unordered-list.a-horizontal .a-list-item a.a-link-normal"
-    );
-    const categories = Array.from(categoryElements)
-      .map((el) => el.textContent.trim())
-      .join(">");
-
-    let description = "";
-    const featureBullets = document.querySelector("#feature-bullets");
-    if (featureBullets) {
-      const listItems = featureBullets.querySelectorAll(
-        "ul.a-unordered-list.a-vertical.a-spacing-mini li span.a-list-item"
+      let brand = "";
+      const techTableRows = document.querySelectorAll(
+        "#productDetails_techSpec_section_1 tr"
       );
-      description = Array.from(listItems)
-        .map((item) => item.textContent.trim())
-        .join("\n");
-    }
+      for (const row of techTableRows) {
+        const th = row.querySelector("th");
+        const td = row.querySelector("td");
+        if (th && td && th.textContent.trim() === "Marka Adı") {
+          brand = td.textContent.trim().replace("‎", "");
+          break;
+        }
+      }
+
+      const titleElement = document.querySelector("#productTitle");
+      const title = titleElement ? titleElement.textContent.trim() : "";
+
+      const imageElements = document.querySelectorAll(
+        "#altImages .imageThumbnail img"
+      );
+      const videoElements = document.querySelectorAll(
+        "#altImages .videoThumbnail img"
+      );
+      let allImages = [];
+      imageElements.forEach((img) => {
+        const src = img.getAttribute("src");
+        if (src && !allImages.includes(src)) allImages.push(src);
+      });
+      videoElements.forEach((videoImg) => {
+        const src = videoImg.getAttribute("src");
+        if (src && !allImages.includes(src)) allImages.push(src);
+      });
+      const imagesString = allImages.join(";");
+
+      let rating = null;
+      const ratingElement = document.querySelector(
+        "#acrPopover .a-size-base.a-color-base"
+      );
+      if (ratingElement) {
+        const ratingText = ratingElement.textContent.trim().replace(",", ".");
+        rating = parseFloat(ratingText);
+      }
+
+      const specifications = [];
+      const specRows = document.querySelectorAll(
+        "#productDetails_techSpec_section_1 tr"
+      );
+      specRows.forEach((row) => {
+        const nameElement = row.querySelector("th");
+        const valueElement = row.querySelector("td");
+        if (nameElement && valueElement) {
+          const name = nameElement.textContent.trim();
+          const value = valueElement.textContent.trim().replace("‎", "");
+          specifications.push({ name, value });
+        }
+      });
+
+      const categoryElements = document.querySelectorAll(
+        "ul.a-unordered-list.a-horizontal .a-list-item a.a-link-normal"
+      );
+      const categories = Array.from(categoryElements)
+        .map((el) => el.textContent.trim())
+        .join(">");
+
+      let description = "";
+      const featureBullets = document.querySelector("#feature-bullets");
+      if (featureBullets) {
+        const listItems = featureBullets.querySelectorAll(
+          "ul.a-unordered-list.a-vertical.a-spacing-mini li span.a-list-item"
+        );
+        description = Array.from(listItems)
+          .map((item) => item.textContent.trim())
+          .join("\n");
+      }
+
+      return {
+        price,
+        currency,
+        productId,
+        brand,
+        title,
+        images: imagesString,
+        rating,
+        specifications,
+        categories,
+        description,
+      };
+    });
 
     return {
-      price,
-      currency,
-      productId,
-      brand,
-      title,
-      images: imagesString,
-      rating,
-      specifications,
-      categories,
-      description,
+      url,
+      productId: productData.productId,
+      brand: productData.brand,
+      title: productData.title || "",
+      price:
+        productData.price !== null
+          ? parseFloat(productData.price.toFixed(3))
+          : null,
+      currency: productData.currency,
+      images: productData.images || "",
+      rating: productData.rating !== null ? productData.rating : null,
+      specifications: productData.specifications || [],
+      categories: productData.categories || "",
+      description: productData.description || "",
     };
-  });
-
-  return {
-    url,
-    productId: productData.productId,
-    brand: productData.brand,
-    title: productData.title || "",
-    price:
-      productData.price !== null
-        ? parseFloat(productData.price.toFixed(3))
-        : null,
-    currency: productData.currency,
-    images: productData.images || "",
-    rating: productData.rating !== null ? productData.rating : null,
-    specifications: productData.specifications || [],
-    categories: productData.categories || "",
-    description: productData.description || "",
-  };
+  } catch (error) {
+    logProgress("PRODUCT_SCRAPING", `Error scraping product: ${error.message}`);
+    throw error;
+  }
 };
 
 // Save data to file
@@ -236,6 +242,7 @@ const scrapePageByPage = async (
   let currentPage = 1;
   const maxPages = 10;
 
+  // Setup page
   await page.setUserAgent(getRandomUserAgent());
   await page.setExtraHTTPHeaders({
     "Accept-Language": "en-US,en;q=0.9",
@@ -252,17 +259,22 @@ const scrapePageByPage = async (
     );
 
     try {
+      // Go to the page and wait for content to load
       await page.goto(currentUrl, {
         waitUntil: "domcontentloaded",
         timeout: 30000,
       });
+
+      // Wait a bit longer for full page content
+      await delay(2000);
+
       logProgress("PAGE_SCRAPING", `Loaded page ${currentPage}`);
 
       // Wait for product cards to load
       await page.waitForSelector(".puis-card-container", { timeout: 10000 });
       logProgress("PAGE_SCRAPING", "Product cards loaded");
 
-      // Extract product URLs from the new card structure
+      // Extract product URLs from the card structure
       const productUrls = await page.evaluate(() => {
         const productCards = document.querySelectorAll(".puis-card-container");
         return Array.from(productCards)
@@ -281,6 +293,15 @@ const scrapePageByPage = async (
         `Found ${productUrls.length} product URLs on page ${currentPage}`
       );
 
+      // Create a separate page for product scraping to avoid navigation issues
+      const productPage = await browser.newPage();
+      await productPage.setUserAgent(getRandomUserAgent());
+      await productPage.setExtraHTTPHeaders({
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      });
+
       // Scrape each product
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
@@ -292,7 +313,7 @@ const scrapePageByPage = async (
         }
 
         try {
-          const productData = await scrapeProductDetails(page, url);
+          const productData = await scrapeProductDetails(productPage, url);
           productDataArray.push(productData);
           logProgress(
             "PAGE_SCRAPING",
@@ -320,30 +341,54 @@ const scrapePageByPage = async (
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(200);
+        await delay(500); // Increase delay between product scrapes
       }
 
-      // Get the next page URL from the "Sonraki" button in the last <li> of the pagination <ul>
-      const nextPageUrl = await page.evaluate(() => {
-        const paginationList = document.querySelector(
-          "ul.a-unordered-list.a-horizontal.s-unordered-list-accessibility"
-        );
-        if (paginationList) {
-          console.log("Pagination list found");
-        }
-        if (paginationList) {
-          // Last <li>
-          const nextButton = page.querySelector(
-            "ul li span.a-list-item a[aria-label^='Sonraki sayfaya git']"
+      await productPage.close();
+
+      // Wait for pagination to load with retries
+      let paginationLoaded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await page.waitForSelector(
+            "ul.a-unordered-list.a-horizontal.s-unordered-list-accessibility",
+            { timeout: 5000 }
           );
-          console.log(nextButton);
-          {
-            console.log("Next button found");
-          }
-          if (nextButton) {
-            const href = nextButton.getAttribute("href");
-            return href ? `https://www.amazon.com.tr${href}` : null;
-          }
+          paginationLoaded = true;
+          logProgress(
+            "PAGE_SCRAPING",
+            `Pagination loaded on attempt ${attempt + 1}`
+          );
+          break;
+        } catch (error) {
+          logProgress(
+            "PAGE_SCRAPING",
+            `Pagination not found on attempt ${attempt + 1}, retrying...`
+          );
+          await delay(1000);
+          // Scroll to bottom to trigger pagination loading
+          await page.evaluate(() => {
+            window.scrollTo(0, document.body.scrollHeight);
+          });
+        }
+      }
+
+      if (!paginationLoaded) {
+        logProgress(
+          "PAGE_SCRAPING",
+          "Could not find pagination after multiple attempts"
+        );
+        break;
+      }
+
+      // Get the next page URL using the reliable selector from your example
+      const nextPageUrl = await page.evaluate(() => {
+        const nextButton = document.querySelector(
+          'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
+        );
+        if (nextButton) {
+          const href = nextButton.getAttribute("href");
+          return href ? `https://www.amazon.com.tr${href}` : null;
         }
         return null;
       });
@@ -351,14 +396,18 @@ const scrapePageByPage = async (
       if (!nextPageUrl) {
         logProgress(
           "PAGE_SCRAPING",
-          "No 'Sonraki' button found in pagination. Stopping."
+          "No next page button found. Stopping pagination."
         );
         break;
       }
 
       logProgress("PAGE_SCRAPING", `Moving to next page: ${nextPageUrl}`);
       currentPage++;
-      await delay(500);
+      await page.goto(nextPageUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
+      await delay(2000); // Longer delay between page navigations
     } catch (error) {
       logProgress(
         "PAGE_SCRAPING",
@@ -370,7 +419,7 @@ const scrapePageByPage = async (
 };
 
 // Main scraping function
-const scrapeAmazonUrls = async () => {
+const scrapeAmazonProducts = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
     console.error("Usage: node script.js <url>");
@@ -381,7 +430,7 @@ const scrapeAmazonUrls = async () => {
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
 
-    const browser = await launchBrowser();
+    browser = await launchBrowser();
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing URL: ${baseUrl}`);
@@ -441,4 +490,4 @@ const scrapeAmazonUrls = async () => {
   }
 };
 
-scrapeAmazonUrls();
+scrapeAmazonProducts();
