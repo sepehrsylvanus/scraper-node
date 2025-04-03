@@ -49,6 +49,7 @@ const launchBrowser = async (retries = 3) => {
           "--start-maximized",
           "--disable-web-security",
           "--disable-features=IsolateOrigins,site-per-process",
+          "--disable-dev-shm-usage", // Added to prevent memory issues
         ],
         defaultViewport: null,
       });
@@ -71,7 +72,11 @@ const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
 
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    // Wait until network is idle to ensure full page load
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+
+    // Additional wait to ensure all dynamic content loads
+    await page.waitForSelector("#productTitle", { timeout: 10000 });
 
     const productData = await page.evaluate(() => {
       let price = null;
@@ -201,7 +206,19 @@ const scrapeProductDetails = async (page, url) => {
     };
   } catch (error) {
     logProgress("PRODUCT_SCRAPING", `Error scraping product: ${error.message}`);
-    throw error;
+    return {
+      url,
+      productId: "",
+      brand: "",
+      title: "",
+      price: null,
+      currency: "",
+      images: "",
+      rating: null,
+      specifications: [],
+      categories: "",
+      description: "",
+    };
   }
 };
 
@@ -242,7 +259,6 @@ const scrapePageByPage = async (
   let currentPage = 1;
   const maxPages = 10;
 
-  // Setup page
   await page.setUserAgent(getRandomUserAgent());
   await page.setExtraHTTPHeaders({
     "Accept-Language": "en-US,en;q=0.9",
@@ -259,22 +275,13 @@ const scrapePageByPage = async (
     );
 
     try {
-      // Go to the page and wait for content to load
       await page.goto(currentUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
+        waitUntil: "networkidle2",
+        timeout: 60000,
       });
-
-      // Wait a bit longer for full page content
-      await delay(2000);
-
+      await page.waitForSelector(".puis-card-container", { timeout: 10000 });
       logProgress("PAGE_SCRAPING", `Loaded page ${currentPage}`);
 
-      // Wait for product cards to load
-      await page.waitForSelector(".puis-card-container", { timeout: 10000 });
-      logProgress("PAGE_SCRAPING", "Product cards loaded");
-
-      // Extract product URLs from the card structure
       const productUrls = await page.evaluate(() => {
         const productCards = document.querySelectorAll(".puis-card-container");
         return Array.from(productCards)
@@ -293,7 +300,6 @@ const scrapePageByPage = async (
         `Found ${productUrls.length} product URLs on page ${currentPage}`
       );
 
-      // Create a separate page for product scraping to avoid navigation issues
       const productPage = await browser.newPage();
       await productPage.setUserAgent(getRandomUserAgent());
       await productPage.setExtraHTTPHeaders({
@@ -302,7 +308,6 @@ const scrapePageByPage = async (
           "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
       });
 
-      // Scrape each product
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
           logProgress(
@@ -341,12 +346,11 @@ const scrapePageByPage = async (
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(500); // Increase delay between product scrapes
+        await delay(500); // Wait 0.5 seconds before next product
       }
 
       await productPage.close();
 
-      // Wait for pagination to load with retries
       let paginationLoaded = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -366,10 +370,9 @@ const scrapePageByPage = async (
             `Pagination not found on attempt ${attempt + 1}, retrying...`
           );
           await delay(1000);
-          // Scroll to bottom to trigger pagination loading
-          await page.evaluate(() => {
-            window.scrollTo(0, document.body.scrollHeight);
-          });
+          await page.evaluate(() =>
+            window.scrollTo(0, document.body.scrollHeight)
+          );
         }
       }
 
@@ -381,16 +384,13 @@ const scrapePageByPage = async (
         break;
       }
 
-      // Get the next page URL using the reliable selector from your example
       const nextPageUrl = await page.evaluate(() => {
         const nextButton = document.querySelector(
           'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
         );
-        if (nextButton) {
-          const href = nextButton.getAttribute("href");
-          return href ? `https://www.amazon.com.tr${href}` : null;
-        }
-        return null;
+        return nextButton
+          ? `https://www.amazon.com.tr${nextButton.getAttribute("href")}`
+          : null;
       });
 
       if (!nextPageUrl) {
@@ -403,11 +403,7 @@ const scrapePageByPage = async (
 
       logProgress("PAGE_SCRAPING", `Moving to next page: ${nextPageUrl}`);
       currentPage++;
-      await page.goto(nextPageUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
-      });
-      await delay(2000); // Longer delay between page navigations
+      await delay(2000); // Additional delay between pages
     } catch (error) {
       logProgress(
         "PAGE_SCRAPING",
