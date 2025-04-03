@@ -1,335 +1,446 @@
 const puppeteer = require("puppeteer");
-const cheerio = require("cheerio");
 const fs = require("fs");
 const path = require("path");
-const axios = require("axios").default;
 
-const port = 33335;
-const session_id = (1000000 * Math.random()) | 0;
-const options = {
-  auth: {
-    username: `brd-customer-hl_7930d613-zone-davutbey-session-${session_id}`,
-    password: "3wa371vuwi2e",
-  },
-  host: "brd.superproxy.io",
-  port,
-  rejectUnauthorized: false,
-};
+const outputDir = path.join(__dirname, "output");
+if (!fs.existsSync(outputDir)) {
+  fs.mkdirSync(outputDir);
+}
 
 let browser;
-let shouldStop = false;
 
-// Proxy list fetched from free-proxy-list.net
-let proxyList = [];
-let proxyIndex = 0;
-
-const today = new Date("2025-03-10");
+const today = new Date();
 const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
   2,
   "0"
 )}-${String(today.getDate()).padStart(2, "0")}`;
-const outputDir = path.join(__dirname, "output");
-if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
 // Utility to delay execution
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Fetch free proxies from free-proxy-list.net
-const fetchFreeProxies = async () => {
-  try {
-    const response = await axios.get("https://free-proxy-list.net/", {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-      },
-    });
-    const $ = cheerio.load(response.data);
-    const proxies = [];
-    $("#list tbody tr").each((i, row) => {
-      const cols = $(row).find("td");
-      const host = $(cols[0]).text().trim();
-      const port = parseInt($(cols[1]).text().trim());
-      const isHttps = $(cols[6]).text().trim() === "yes";
-      if (host && port && !isHttps) {
-        // Use HTTP proxies only for simplicity
-        proxies.push({ host, port });
-      }
-    });
-    console.log(
-      `Fetched ${proxies.length} free proxies from free-proxy-list.net`
-    );
-    return proxies;
-  } catch (error) {
-    console.error("Failed to fetch proxies:", error.message);
-    return [];
+// Custom logging function
+const logProgress = (level, message) => {
+  console.log(`[${new Date().toISOString()}] [${level}] ${message}`);
+};
+
+// Randomize user-agent
+const getRandomUserAgent = () => {
+  const userAgents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
+  ];
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+};
+
+// Load proxies from file
+const loadProxies = () => {
+  const proxyFile = path.join(outputDir, "proxies.json");
+  if (fs.existsSync(proxyFile)) {
+    return JSON.parse(fs.readFileSync(proxyFile, "utf8"));
   }
+  throw new Error("No proxies found. Run getProxies.js first.");
 };
 
-// Get the next proxy from the list
-const getNextProxy = () => {
-  if (!proxyList.length) return null;
-  const proxy = proxyList[proxyIndex];
-  proxyIndex = (proxyIndex + 1) % proxyList.length; // Rotate through the list
-  return proxy;
-};
-
-// Launch browser with retry logic
-const launchBrowser = async (retries = 3) => {
+// Launch browser with proxy and retry logic
+const launchBrowser = async (proxies, retries = 3) => {
+  const proxy = proxies[Math.floor(Math.random() * proxies.length)];
   for (let i = 0; i < retries; i++) {
     try {
       if (browser && browser.isConnected()) return browser;
+      logProgress(
+        "BROWSER",
+        `Launching browser with proxy ${proxy} (attempt ${i + 1})...`
+      );
+
       browser = await puppeteer.launch({
-        headless: true,
-        protocolTimeout: 120000, // Increased to 120 seconds
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        headless: false,
+        protocolTimeout: 86400000,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--start-maximized",
+          "--disable-web-security",
+          "--disable-features=IsolateOrigins,site-per-process",
+          `--proxy-server=${proxy}`,
+        ],
+        defaultViewport: null,
       });
-      console.log("Browser launched successfully");
+
+      const tempPage = await browser.newPage();
+      await tempPage.setUserAgent(getRandomUserAgent());
+      await tempPage.close();
+
       return browser;
     } catch (error) {
-      console.error(`Browser launch attempt ${i + 1} failed:`, error.message);
+      console.error(`Browser launch attempt ${i + 1} failed:`, error);
       if (i === retries - 1) throw error;
-      await delay(2000);
+      await delay(1000);
     }
   }
 };
 
-// Extract product URLs from a page using Cheerio
-const extractProductUrls = (html, baseUrl) => {
-  const $ = cheerio.load(html);
-  const productElements = $(".columnContent");
-  return productElements
-    .map((i, element) => {
-      const linkElement = $(element).find(".pro a[href]");
-      const href = linkElement.attr("href");
-      return href && !href.includes("javascript:") ? href : null;
-    })
-    .get()
-    .filter(Boolean)
-    .map((url) => (url.startsWith("http") ? url : new URL(url, baseUrl).href));
-};
+// Scrape product details from individual product page
+const scrapeProductDetails = async (page, url) => {
+  logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
 
-// Scrape products page by page
-const scrapePageByPage = async (page, baseUrl, processedUrls = new Set()) => {
-  console.log(`Starting scrape for: ${baseUrl}`);
-  let allProductUrls = new Set();
-  let currentPage = 1;
-  let totalProducts = 0;
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-  while (!shouldStop) {
-    const pageUrl = `${baseUrl.split("?")[0]}?pg=${currentPage}`;
-    console.log(`Scraping page ${currentPage}: ${pageUrl}`);
-
-    try {
-      await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
-      await delay(5000);
-
-      const html = await page.content();
-      const $ = cheerio.load(html);
-
-      if (currentPage === 1) {
-        const resultText = $(".listOptionHolder .resultText strong").text();
-        totalProducts = resultText
-          ? parseInt(resultText.replace(/[^0-9-]/g, ""), 10) || 0
-          : 0;
-        console.log(`Total products expected: ${totalProducts}`);
+    const productData = await page.evaluate(() => {
+      let price = null;
+      let currency = "";
+      const wholePriceElement = document.querySelector("span.a-price-whole");
+      const fractionPriceElement = document.querySelector(
+        "span.a-price-fraction"
+      );
+      const currencyElement = document.querySelector("span.a-price-symbol");
+      if (wholePriceElement && fractionPriceElement && currencyElement) {
+        const wholePriceText = wholePriceElement.textContent.replace(
+          /[^0-9]/g,
+          ""
+        );
+        const fractionPrice = fractionPriceElement.textContent.padStart(2, "0");
+        currency = currencyElement.textContent;
+        price = parseFloat(`${wholePriceText}.${fractionPrice}`);
+        if (price > 100) price = price / 1000;
       }
 
-      const currentUrls = extractProductUrls(html, baseUrl);
-      currentUrls.forEach((url) => {
-        if (!processedUrls.has(url)) allProductUrls.add(url);
+      const productIdMatch = window.location.href.match(/\/dp\/([A-Z0-9]{10})/);
+      const productId = productIdMatch ? productIdMatch[1] : "";
+
+      let brand = "";
+      const techTableRows = document.querySelectorAll(
+        "#productDetails_techSpec_section_1 tr"
+      );
+      for (const row of techTableRows) {
+        const th = row.querySelector("th");
+        const td = row.querySelector("td");
+        if (th && td && th.textContent.trim() === "Marka Adı") {
+          brand = td.textContent.trim().replace("‎", "");
+          break;
+        }
+      }
+
+      const titleElement = document.querySelector("#productTitle");
+      const title = titleElement ? titleElement.textContent.trim() : "";
+
+      const imageElements = document.querySelectorAll(
+        "#altImages .imageThumbnail img"
+      );
+      const videoElements = document.querySelectorAll(
+        "#altImages .videoThumbnail img"
+      );
+      let allImages = [];
+      imageElements.forEach((img) => {
+        const src = img.getAttribute("src");
+        if (src && !allImages.includes(src)) allImages.push(src);
       });
-      console.log(
-        `Page ${currentPage}: Found ${currentUrls.length} URLs, Unique new: ${allProductUrls.size}`
-      );
+      videoElements.forEach((videoImg) => {
+        const src = videoImg.getAttribute("src");
+        if (src && !allImages.includes(src)) allImages.push(src);
+      });
+      const imagesString = allImages.join(";");
 
-      if (
-        totalProducts > 0 &&
-        allProductUrls.size + processedUrls.size >= totalProducts
-      ) {
-        console.log(`Collected all ${totalProducts} products.`);
-        break;
+      let rating = null;
+      const ratingElement = document.querySelector(
+        "#acrPopover .a-size-base.a-color-base"
+      );
+      if (ratingElement) {
+        const ratingText = ratingElement.textContent.trim().replace(",", ".");
+        rating = parseFloat(ratingText);
       }
 
-      const hasNextPage = $(".pagination a.next:not(.disabled)").length > 0;
-      if (!hasNextPage) {
-        console.log(`No next page found after page ${currentPage}.`);
-        break;
-      }
-
-      currentPage++;
-    } catch (error) {
-      console.error(`Error on page ${currentPage}:`, error.message);
-      break;
-    }
-  }
-
-  return { productUrls: Array.from(allProductUrls), totalProducts };
-};
-
-// Scrape individual product details with rotating free proxies
-const scrapeProductDetails = async (browser, url, retries = 3) => {
-  for (let i = 0; i < retries; i++) {
-    let page;
-    try {
-      console.log(
-        `Scraping product with proxy ${options.host}:${options.port}: ${url}`
+      const specifications = [];
+      const specRows = document.querySelectorAll(
+        "#productDetails_techSpec_section_1 tr"
       );
-      const response = await axios.get(url, options);
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
-      await delay(3000);
-
-      const html = await page.content();
-      const $ = cheerio.load(html);
-
-      const title = $(".unf-p-title .proName").text().trim() || null;
-      let brand = null;
-      $(".unf-prop-list-item").each((i, item) => {
-        if ($(item).find(".unf-prop-list-title").text().trim() === "Marka") {
-          brand = $(item).find(".unf-prop-list-prop").text().trim() || null;
+      specRows.forEach((row) => {
+        const nameElement = row.querySelector("th");
+        const valueElement = row.querySelector("td");
+        if (nameElement && valueElement) {
+          const name = nameElement.textContent.trim();
+          const value = valueElement.textContent.trim().replace("‎", "");
+          specifications.push({ name, value });
         }
       });
 
-      const priceElement = $(".newPrice ins");
-      const price = priceElement.attr("content")
-        ? parseFloat(priceElement.attr("content"))
-        : null;
-      const currency =
-        priceElement.find("span").attr("content") ||
-        priceElement.find("span").text().trim() ||
-        null;
+      const categoryElements = document.querySelectorAll(
+        "ul.a-unordered-list.a-horizontal .a-list-item a.a-link-normal"
+      );
+      const categories = Array.from(categoryElements)
+        .map((el) => el.textContent.trim())
+        .join(">");
 
-      const imageUrls = $(".unf-p-thumbs .unf-p-thumbs-item img")
-        .map((i, img) => $(img).attr("src"))
-        .get()
-        .filter(Boolean);
-      const images = imageUrls.length ? imageUrls.join(";") : null;
+      let description = "";
+      const featureBullets = document.querySelector("#feature-bullets");
+      if (featureBullets) {
+        const listItems = featureBullets.querySelectorAll(
+          "ul.a-unordered-list.a-vertical.a-spacing-mini li span.a-list-item"
+        );
+        description = Array.from(listItems)
+          .map((item) => item.textContent.trim())
+          .join("\n");
+      }
 
-      const rating = $(".ratingCont .ratingScore").text().trim()
-        ? parseFloat($(".ratingCont .ratingScore").text().trim())
-        : null;
-      const shippingFee = $(".shipping-fee, .delivery-cost")
-        .text()
-        .replace(/[^\d.]/g, "")
-        ? parseFloat(
-            $(".shipping-fee, .delivery-cost")
-              .text()
-              .replace(/[^\d.]/g, "")
-          )
-        : null;
-      const description = $(".unf-info-desc").text().trim() || null;
-
-      const specifications = $(".unf-prop-list-item")
-        .map((i, item) => ({
-          name: $(item).find(".unf-prop-list-title").text().trim(),
-          value: $(item).find(".unf-prop-list-prop").text().trim(),
-        }))
-        .get()
-        .filter((spec) => spec.name && spec.value);
-
-      const categories =
-        $(".breadcrumb, .breadcrumbs").text().trim().replace(/\s+/g, ">") ||
-        null;
-      const productId = url.match(/-(\d+)(?:[?/#]|$)/)?.[1] || null;
-
-      await page.close();
       return {
-        url,
-        title,
-        brand,
         price,
         currency,
-        images,
+        productId,
+        brand,
+        title,
+        images: imagesString,
         rating,
-        shipping_fee: shippingFee,
-        description,
         specifications,
         categories,
-        productId,
+        description,
       };
-    } catch (error) {
-      console.error(`Attempt ${i + 1} failed for ${url}:`, error.message);
-      if (page) await page.close();
-      if (i === retries - 1) {
-        return {
-          url,
-          title: null,
-          brand: null,
-          price: null,
-          currency: null,
-          images: null,
-          rating: null,
-          shipping_fee: null,
-          description: null,
-          specifications: [],
-          categories: null,
-          productId: null,
-          error: error.message,
-        };
-      }
-      await delay(5000 * (i + 1)); // Exponential backoff
-    }
-  }
-};
+    });
 
-// Save products to file
-const saveProductsToFile = (products, filePath) => {
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(products, null, 2));
-    console.log(`Saved products to ${filePath}`);
+    return {
+      url,
+      productId: productData.productId,
+      brand: productData.brand,
+      title: productData.title || "",
+      price:
+        productData.price !== null
+          ? parseFloat(productData.price.toFixed(3))
+          : null,
+      currency: productData.currency,
+      images: productData.images || "",
+      rating: productData.rating !== null ? productData.rating : null,
+      specifications: productData.specifications || [],
+      categories: productData.categories || "",
+      description: productData.description || "",
+    };
   } catch (error) {
-    console.error(`Failed to save products to ${filePath}:`, error.message);
+    logProgress("PRODUCT_SCRAPING", `Error scraping product: ${error.message}`);
+    throw error;
   }
 };
 
-// Load existing products
-const loadExistingProducts = (baseUrl, dir) => {
+// Save data to file
+const saveUrlsToFile = (data, filePath) => {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  logProgress("FILE", `Saved ${data.length} product entries to ${filePath}`);
+};
+
+// Load existing URLs
+const loadExistingUrls = (baseUrl, dir) => {
   const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
   const existingFiles = fs
     .readdirSync(dir)
     .filter((file) => file.includes(urlSlug) && file.endsWith(".json"));
-  const existingProducts = new Set();
+  const existingUrls = new Set();
 
   for (const file of existingFiles) {
     try {
       const data = fs.readFileSync(path.join(dir, file), "utf8");
-      const products = JSON.parse(data);
-      products.forEach(
-        (product) => product.url && existingProducts.add(product.url)
-      );
+      const entries = JSON.parse(data);
+      entries.forEach((entry) => existingUrls.add(entry.url));
     } catch (error) {
       console.error(`Error reading ${file}:`, error.message);
     }
   }
-  console.log(
-    `Loaded ${existingProducts.size} existing products for ${baseUrl}`
-  );
-  return existingProducts;
+  return existingUrls;
+};
+
+// Scrape products page by page
+const scrapePageByPage = async (
+  page,
+  baseUrl,
+  processedUrls,
+  productDataArray,
+  outputFileName
+) => {
+  let currentPage = 1;
+  const maxPages = 10;
+
+  await page.setUserAgent(getRandomUserAgent());
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "en-US,en;q=0.9",
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  });
+
+  while (currentPage <= maxPages) {
+    const currentUrl =
+      currentPage === 1 ? baseUrl : `${baseUrl}&page=${currentPage}`;
+    logProgress(
+      "PAGE_SCRAPING",
+      `Navigating to page ${currentPage}: ${currentUrl}`
+    );
+
+    try {
+      await page.goto(currentUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
+      await delay(2000);
+
+      logProgress("PAGE_SCRAPING", `Loaded page ${currentPage}`);
+      await page.waitForSelector(".puis-card-container", { timeout: 10000 });
+      logProgress("PAGE_SCRAPING", "Product cards loaded");
+
+      const productUrls = await page.evaluate(() => {
+        const productCards = document.querySelectorAll(".puis-card-container");
+        return Array.from(productCards)
+          .map((card) => {
+            const link = card.querySelector("a.a-link-normal.s-no-outline");
+            return link ? link.getAttribute("href") : null;
+          })
+          .filter((url) => url && url.includes("/dp/"))
+          .map((url) =>
+            url.startsWith("http") ? url : `https://www.amazon.com.tr${url}`
+          );
+      });
+
+      logProgress(
+        "PAGE_SCRAPING",
+        `Found ${productUrls.length} product URLs on page ${currentPage}`
+      );
+
+      const productPage = await browser.newPage();
+      await productPage.setUserAgent(getRandomUserAgent());
+      await productPage.setExtraHTTPHeaders({
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      });
+
+      for (const url of productUrls) {
+        if (processedUrls.has(url)) {
+          logProgress(
+            "PAGE_SCRAPING",
+            `Skipping already processed URL: ${url}`
+          );
+          continue;
+        }
+
+        try {
+          const productData = await scrapeProductDetails(productPage, url);
+          productDataArray.push(productData);
+          logProgress(
+            "PAGE_SCRAPING",
+            `Scraped ${url}: Price=${productData.price}, Currency=${productData.currency}`
+          );
+          saveUrlsToFile(productDataArray, outputFileName);
+          processedUrls.add(url);
+        } catch (error) {
+          logProgress(
+            "PAGE_SCRAPING",
+            `Failed to scrape ${url}: ${error.message}`
+          );
+          productDataArray.push({
+            url,
+            productId: "",
+            brand: "",
+            title: "",
+            price: null,
+            currency: "",
+            images: "",
+            rating: null,
+            specifications: [],
+            categories: "",
+            description: "",
+          });
+          saveUrlsToFile(productDataArray, outputFileName);
+        }
+        await delay(500);
+      }
+
+      await productPage.close();
+
+      let paginationLoaded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await page.waitForSelector(
+            "ul.a-unordered-list.a-horizontal.s-unordered-list-accessibility",
+            { timeout: 5000 }
+          );
+          paginationLoaded = true;
+          logProgress(
+            "PAGE_SCRAPING",
+            `Pagination loaded on attempt ${attempt + 1}`
+          );
+          break;
+        } catch (error) {
+          logProgress(
+            "PAGE_SCRAPING",
+            `Pagination not found on attempt ${attempt + 1}, retrying...`
+          );
+          await delay(1000);
+          await page.evaluate(() =>
+            window.scrollTo(0, document.body.scrollHeight)
+          );
+        }
+      }
+
+      if (!paginationLoaded) {
+        logProgress(
+          "PAGE_SCRAPING",
+          "Could not find pagination after multiple attempts"
+        );
+        break;
+      }
+
+      const nextPageUrl = await page.evaluate(() => {
+        const nextButton = document.querySelector(
+          'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
+        );
+        if (nextButton) {
+          const href = nextButton.getAttribute("href");
+          return href ? `https://www.amazon.com.tr${href}` : null;
+        }
+        return null;
+      });
+
+      if (!nextPageUrl) {
+        logProgress(
+          "PAGE_SCRAPING",
+          "No next page button found. Stopping pagination."
+        );
+        break;
+      }
+
+      logProgress("PAGE_SCRAPING", `Moving to next page: ${nextPageUrl}`);
+      currentPage++;
+      await page.goto(nextPageUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
+      await delay(2000);
+    } catch (error) {
+      logProgress(
+        "PAGE_SCRAPING",
+        `Error on page ${currentPage}: ${error.message}. Stopping.`
+      );
+      break;
+    }
+  }
 };
 
 // Main scraping function
-const scrapeMultipleUrls = async () => {
+const scrapeAmazonProducts = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
-    console.error("Usage: node script.js <url1> <url2> ...");
-    process.exit(1);
-  }
-
-  // Fetch proxies before starting
-  proxyList = await fetchFreeProxies();
-  if (!proxyList.length) {
-    console.error("No proxies available. Exiting.");
+    console.error("Usage: node scraper.js <url>");
     process.exit(1);
   }
 
   try {
-    const browser = await launchBrowser();
-    const n11Dir = path.join(outputDir, "n11");
-    if (!fs.existsSync(n11Dir)) fs.mkdirSync(n11Dir, { recursive: true });
+    const proxies = loadProxies();
+    if (!proxies.length) throw new Error("No proxies available.");
+
+    const amazonDir = path.join(outputDir, "amazon");
+    if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
+
+    browser = await launchBrowser(proxies);
 
     for (const baseUrl of urls) {
-      console.log(`\nProcessing: ${baseUrl}`);
-      const processedUrls = loadExistingProducts(baseUrl, n11Dir);
-      const productsArray = [];
+      logProgress("MAIN", `Processing URL: ${baseUrl}`);
+      let processedUrls = loadExistingUrls(baseUrl, amazonDir);
+      let productDataArray = [];
 
       const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
       const timestamp = new Date()
@@ -338,117 +449,50 @@ const scrapeMultipleUrls = async () => {
         .replace("T", "_")
         .split("Z")[0];
       const outputFileName = path.join(
-        n11Dir,
+        amazonDir,
         `products_${dateStr}_${urlSlug}_${timestamp}.json`
       );
-      saveProductsToFile(productsArray, outputFileName);
 
-      const mainPage = await browser.newPage();
-      await mainPage.setExtraHTTPHeaders({
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-      });
-
-      const { productUrls, totalProducts } = await scrapePageByPage(
-        mainPage,
-        baseUrl,
-        processedUrls
-      );
-      await mainPage.close();
-
-      console.log(
-        `Found ${productUrls.length} new product URLs out of ${totalProducts}`
-      );
-
-      for (let i = 0; i < productUrls.length; i++) {
-        const productUrl = productUrls[i];
-        if (processedUrls.has(productUrl)) {
-          console.log(`Skipping processed URL: ${productUrl}`);
-          continue;
-        }
-
-        const productPage = await browser.newPage();
+      if (fs.existsSync(outputFileName)) {
         try {
-          const details = await scrapeProductDetails(productPage, productUrl);
-          productsArray.push(details);
-          processedUrls.add(productUrl);
-          saveProductsToFile(productsArray, outputFileName);
-          console.log(
-            `Progress: ${productsArray.length}/${totalProducts} - Saved ${productUrl}`
+          const existingData = fs.readFileSync(outputFileName, "utf8");
+          productDataArray = JSON.parse(existingData);
+          logProgress(
+            "MAIN",
+            `Loaded ${productDataArray.length} existing entries from ${outputFileName}`
           );
         } catch (error) {
-          console.error(`Failed to scrape ${productUrl}:`, error.message);
-        } finally {
-          try {
-            await productPage.close();
-          } catch (closeError) {
-            console.error(
-              `Failed to close page for ${productUrl}:`,
-              closeError.message
-            );
-          }
-        }
-        await delay(2000);
-      }
-
-      while (totalProducts > 0 && processedUrls.size < totalProducts - 1) {
-        console.log(
-          `Retrying: ${processedUrls.size}/${totalProducts} collected`
-        );
-        const retryPage = await browser.newPage();
-        const { productUrls: newUrls } = await scrapePageByPage(
-          retryPage,
-          baseUrl,
-          processedUrls
-        );
-        await retryPage.close();
-
-        for (const productUrl of newUrls) {
-          if (processedUrls.has(productUrl)) continue;
-          const productPage = await browser.newPage();
-          try {
-            const details = await scrapeProductDetails(productPage, productUrl);
-            productsArray.push(details);
-            processedUrls.add(productUrl);
-            saveProductsToFile(productsArray, outputFileName);
-            console.log(
-              `Retry Progress: ${productsArray.length}/${totalProducts}`
-            );
-          } finally {
-            try {
-              await productPage.close();
-            } catch (closeError) {
-              console.error(
-                `Failed to close retry page for ${productUrl}:`,
-                closeError.message
-              );
-            }
-          }
-          await delay(2000);
+          console.error(
+            `Error reading existing file ${outputFileName}:`,
+            error.message
+          );
         }
       }
 
-      console.log(
-        `Completed ${baseUrl}: ${processedUrls.size}/${totalProducts} products saved to ${outputFileName}`
+      const page = await browser.newPage();
+      await scrapePageByPage(
+        page,
+        baseUrl,
+        processedUrls,
+        productDataArray,
+        outputFileName
+      );
+      await page.close();
+
+      logProgress(
+        "MAIN",
+        `Completed ${baseUrl}: ${productDataArray.length} entries saved to ${outputFileName}`
       );
     }
 
-    await browser.close();
-    console.log("All URLs processed.");
+    if (browser) await browser.close();
+    logProgress("MAIN", "Browser closed");
     process.exit(0);
   } catch (error) {
-    console.error("Fatal error:", error);
+    console.error("[FATAL] Fatal error:", error);
     if (browser) await browser.close();
     process.exit(1);
   }
 };
 
-process.on("SIGINT", async () => {
-  console.log("Shutting down...");
-  shouldStop = true;
-  if (browser) await browser.close();
-  process.exit(0);
-});
-
-// Run the script
-scrapeMultipleUrls();
+scrapeAmazonProducts();
