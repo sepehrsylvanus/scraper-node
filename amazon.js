@@ -29,40 +29,47 @@ const getRandomUserAgent = () => {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Launch browser with retry logic
+// Launch browser with retry logic and cleanup
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
-      if (browser && browser.isConnected()) return browser;
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
-
       browser = await puppeteer.launch({
         headless: false,
-        protocolTimeout: 86400000,
+        protocolTimeout: 120000, // Increased timeout to 120s
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
-          "--start-maximized",
-          "--disable-web-security",
-          "--disable-features=IsolateOrigins,site-per-process",
-          "--disable-dev-shm-usage", // Added to prevent memory issues
+          "--disable-dev-shm-usage",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--disable-gpu",
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
         ],
-        defaultViewport: null,
+        defaultViewport: { width: 1280, height: 800 },
+        // Handle SIGTERM to gracefully close browser
+        handleSIGTERM: true,
+        handleSIGHUP: true,
       });
 
-      const tempPage = await browser.newPage();
-      await tempPage.setUserAgent(getRandomUserAgent());
-      await tempPage.close();
+      // Ensure browser cleanup on process exit
+      process.on("SIGINT", async () => {
+        await browser.close();
+        process.exit(0);
+      });
 
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
       if (i === retries - 1) throw error;
-      await delay(1000);
+      await delay(2000);
     }
   }
 };
@@ -70,13 +77,9 @@ const launchBrowser = async (retries = 3) => {
 // Scrape product details from individual product page
 const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
-
   try {
-    // Wait until network is idle to ensure full page load
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-
-    // Additional wait to ensure all dynamic content loads
-    await page.waitForSelector("#productTitle", { timeout: 10000 });
+    await page.goto(url, { waitUntil: "networkidle0", timeout: 60000 });
+    await page.waitForSelector("#productTitle", { timeout: 15000 });
 
     const productData = await page.evaluate(() => {
       let price = null;
@@ -248,173 +251,76 @@ const loadExistingUrls = (baseUrl, dir) => {
   return existingUrls;
 };
 
-// Scrape products page by page
-const scrapePageByPage = async (
-  page,
-  baseUrl,
-  processedUrls,
-  productDataArray,
-  outputFileName
-) => {
-  let currentPage = 1;
-  const maxPages = 10;
+// Scrape products from a single page
+const scrapeSinglePage = async (page, url, processedUrls, productDataArray) => {
+  try {
+    await page.goto(url, { waitUntil: "networkidle0", timeout: 60000 });
+    await page.waitForSelector(".puis-card-container", { timeout: 15000 });
+    logProgress("PAGE_SCRAPING", `Loaded page: ${url}`);
 
-  await page.setUserAgent(getRandomUserAgent());
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-US,en;q=0.9",
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-  });
+    const productUrls = await page.evaluate(() => {
+      const productCards = document.querySelectorAll(".puis-card-container");
+      return Array.from(productCards)
+        .map((card) => {
+          const link = card.querySelector("a.a-link-normal.s-no-outline");
+          return link ? link.getAttribute("href") : null;
+        })
+        .filter((url) => url && url.includes("/dp/"))
+        .map((url) =>
+          url.startsWith("http") ? url : `https://www.amazon.com.tr${url}`
+        );
+    });
 
-  while (currentPage <= maxPages) {
-    const currentUrl =
-      currentPage === 1 ? baseUrl : `${baseUrl}&page=${currentPage}`;
     logProgress(
       "PAGE_SCRAPING",
-      `Navigating to page ${currentPage}: ${currentUrl}`
+      `Found ${productUrls.length} product URLs on ${url}`
     );
 
-    try {
-      await page.goto(currentUrl, {
-        waitUntil: "networkidle2",
-        timeout: 60000,
-      });
-      await page.waitForSelector(".puis-card-container", { timeout: 10000 });
-      logProgress("PAGE_SCRAPING", `Loaded page ${currentPage}`);
-
-      const productUrls = await page.evaluate(() => {
-        const productCards = document.querySelectorAll(".puis-card-container");
-        return Array.from(productCards)
-          .map((card) => {
-            const link = card.querySelector("a.a-link-normal.s-no-outline");
-            return link ? link.getAttribute("href") : null;
-          })
-          .filter((url) => url && url.includes("/dp/"))
-          .map((url) =>
-            url.startsWith("http") ? url : `https://www.amazon.com.tr${url}`
-          );
-      });
-
-      logProgress(
-        "PAGE_SCRAPING",
-        `Found ${productUrls.length} product URLs on page ${currentPage}`
-      );
-
+    for (const productUrl of productUrls) {
+      if (processedUrls.has(productUrl)) {
+        logProgress(
+          "PAGE_SCRAPING",
+          `Skipping already processed URL: ${productUrl}`
+        );
+        continue;
+      }
       const productPage = await browser.newPage();
-      await productPage.setUserAgent(getRandomUserAgent());
-      await productPage.setExtraHTTPHeaders({
-        "Accept-Language": "en-US,en;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-      });
-
-      for (const url of productUrls) {
-        if (processedUrls.has(url)) {
-          logProgress(
-            "PAGE_SCRAPING",
-            `Skipping already processed URL: ${url}`
-          );
-          continue;
-        }
-
-        try {
-          const productData = await scrapeProductDetails(productPage, url);
-          productDataArray.push(productData);
-          logProgress(
-            "PAGE_SCRAPING",
-            `Scraped ${url}: Price=${productData.price}, Currency=${productData.currency}`
-          );
-          saveUrlsToFile(productDataArray, outputFileName);
-          processedUrls.add(url);
-        } catch (error) {
-          logProgress(
-            "PAGE_SCRAPING",
-            `Failed to scrape ${url}: ${error.message}`
-          );
-          productDataArray.push({
-            url,
-            productId: "",
-            brand: "",
-            title: "",
-            price: null,
-            currency: "",
-            images: "",
-            rating: null,
-            specifications: [],
-            categories: "",
-            description: "",
-          });
-          saveUrlsToFile(productDataArray, outputFileName);
-        }
-        await delay(500); // Wait 0.5 seconds before next product
-      }
-
-      await productPage.close();
-
-      let paginationLoaded = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await page.waitForSelector(
-            "ul.a-unordered-list.a-horizontal.s-unordered-list-accessibility",
-            { timeout: 5000 }
-          );
-          paginationLoaded = true;
-          logProgress(
-            "PAGE_SCRAPING",
-            `Pagination loaded on attempt ${attempt + 1}`
-          );
-          break;
-        } catch (error) {
-          logProgress(
-            "PAGE_SCRAPING",
-            `Pagination not found on attempt ${attempt + 1}, retrying...`
-          );
-          await delay(1000);
-          await page.evaluate(() =>
-            window.scrollTo(0, document.body.scrollHeight)
-          );
-        }
-      }
-
-      if (!paginationLoaded) {
+      try {
+        await productPage.setUserAgent(getRandomUserAgent());
+        const productData = await scrapeProductDetails(productPage, productUrl);
+        productDataArray.push(productData);
+        processedUrls.add(productUrl);
+      } catch (error) {
         logProgress(
           "PAGE_SCRAPING",
-          "Could not find pagination after multiple attempts"
+          `Failed to scrape product ${productUrl}: ${error.message}`
         );
-        break;
+      } finally {
+        await productPage.close(); // Ensure page is closed even on error
       }
-
-      const nextPageUrl = await page.evaluate(() => {
-        const nextButton = document.querySelector(
-          'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
-        );
-        return nextButton
-          ? `https://www.amazon.com.tr${nextButton.getAttribute("href")}`
-          : null;
-      });
-
-      if (!nextPageUrl) {
-        logProgress(
-          "PAGE_SCRAPING",
-          "No next page button found. Stopping pagination."
-        );
-        break;
-      }
-
-      logProgress("PAGE_SCRAPING", `Moving to next page: ${nextPageUrl}`);
-      currentPage++;
-      await delay(2000); // Additional delay between pages
-    } catch (error) {
-      logProgress(
-        "PAGE_SCRAPING",
-        `Error on page ${currentPage}: ${error.message}. Stopping.`
-      );
-      break;
+      await delay(Math.random() * 1000 + 500); // Random delay between 0.5-1.5s
     }
+
+    const nextPageUrl = await page.evaluate(() => {
+      const nextButton = document.querySelector(
+        'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
+      );
+      return nextButton
+        ? `https://www.amazon.com.tr${nextButton.getAttribute("href")}`
+        : null;
+    });
+
+    return nextPageUrl;
+  } catch (error) {
+    logProgress(
+      "PAGE_SCRAPING",
+      `Error scraping page ${url}: ${error.message}`
+    );
+    return null;
   }
 };
 
-// Main scraping function
+// Main scraping function with better resource management
 const scrapeAmazonProducts = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
@@ -460,15 +366,50 @@ const scrapeAmazonProducts = async () => {
         }
       }
 
-      const page = await browser.newPage();
-      await scrapePageByPage(
-        page,
-        baseUrl,
-        processedUrls,
-        productDataArray,
-        outputFileName
-      );
-      await page.close();
+      let currentUrl = baseUrl;
+      const maxPages = 1000; // Adjust based on your needs
+      let pageCount = 1;
+
+      while (currentUrl && pageCount <= maxPages) {
+        const page = await browser.newPage();
+        try {
+          await page.setUserAgent(getRandomUserAgent());
+          await page.setExtraHTTPHeaders({
+            "Accept-Language": "en-US,en;q=0.9",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          });
+
+          logProgress("MAIN", `Scraping page ${pageCount} of ${maxPages}`);
+          currentUrl = await scrapeSinglePage(
+            page,
+            currentUrl,
+            processedUrls,
+            productDataArray
+          );
+          saveUrlsToFile(productDataArray, outputFileName);
+        } catch (error) {
+          logProgress("MAIN", `Error on page ${pageCount}: ${error.message}`);
+        } finally {
+          await page.close(); // Ensure page is closed even on error
+        }
+
+        pageCount++;
+
+        if (productDataArray.length >= 40000) {
+          logProgress("MAIN", "Reached target of 40,000 products. Stopping.");
+          break;
+        }
+
+        await delay(Math.random() * 2000 + 1000); // Random delay between 1-3s
+
+        // Periodically restart browser to prevent memory leaks
+        if (pageCount % 50 === 0) {
+          logProgress("MAIN", "Restarting browser to free resources...");
+          await browser.close();
+          browser = await launchBrowser();
+        }
+      }
 
       logProgress(
         "MAIN",
