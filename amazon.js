@@ -1,6 +1,10 @@
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const fs = require("fs");
 const path = require("path");
+
+// Add stealth plugin to Puppeteer
+puppeteer.use(StealthPlugin());
 
 const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(outputDir)) {
@@ -31,44 +35,27 @@ const getRandomUserAgent = () => {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/114.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36 Edg/112.0.1722.58",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPad; CPU OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1",
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Launch browser without proxy
+// Launch browser with stealth enhancements
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false, // Set to true for production if desired
+        headless: false, // Set to true for headless mode
         protocolTimeout: 180000,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--start-maximized",
-          "--disable-web-security",
-          "--disable-features=IsolateOrigins,site-per-process",
-          "--disable-sync",
           "--no-first-run",
-          "--disable-telemetry",
+          "--disable-gpu",
         ],
-        defaultViewport: null,
+        defaultViewport: { width: 1280, height: 800 },
       });
-
-      const tempPage = await browser.newPage();
-      await tempPage.setUserAgent(getRandomUserAgent());
-      await tempPage.goto("https://www.google.com", {
-        waitUntil: "domcontentloaded",
-        timeout: 15000,
-      }); // Test connectivity
-      await tempPage.close();
 
       logProgress("BROWSER", "Browser launched successfully");
       return browser;
@@ -77,6 +64,20 @@ const launchBrowser = async (retries = 3) => {
       if (i === retries - 1) throw error;
       await delay(2000);
     }
+  }
+};
+
+// Simulate human-like behavior
+const simulateHumanBehavior = async (page) => {
+  try {
+    await page.evaluate(() => {
+      const x = Math.floor(Math.random() * 800) + 200;
+      const y = Math.floor(Math.random() * 600) + 100;
+      window.scrollTo(x, y);
+    });
+    await delay(Math.random() * 1000 + 500);
+  } catch (error) {
+    logProgress("SIMULATION", `Failed to simulate behavior: ${error.message}`);
   }
 };
 
@@ -90,10 +91,12 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
         "Accept-Language": "en-US,en;q=0.9",
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        Referer: "https://www.amazon.com.tr/", // Random referer to mimic navigation
+        Referer: "https://www.amazon.com.tr/",
+        "Upgrade-Insecure-Requests": "1",
       });
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
       await page.waitForSelector("#productTitle", { timeout: 30000 });
+      await simulateHumanBehavior(page);
 
       const productData = await page.evaluate(() => {
         let price = null;
@@ -245,7 +248,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           description: "",
         };
       }
-      await delay(2000);
+      await delay(5000);
     }
   }
 };
@@ -286,7 +289,7 @@ const scrapePageByPage = async (
   retries = 3
 ) => {
   let currentPage = 1;
-  const maxPages = 10;
+  const maxPages = 5;
 
   await page.setUserAgent(getRandomUserAgent());
   await page.setExtraHTTPHeaders({
@@ -294,6 +297,7 @@ const scrapePageByPage = async (
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     Referer: "https://www.amazon.com.tr/",
+    "Upgrade-Insecure-Requests": "1",
   });
 
   let currentUrl = baseUrl;
@@ -309,6 +313,7 @@ const scrapePageByPage = async (
           timeout: 90000,
         });
         await page.waitForSelector(".puis-card-container", { timeout: 30000 });
+        await simulateHumanBehavior(page);
 
         const { productUrls, nextPageUrl } = await page.evaluate(() => {
           const productCards = document.querySelectorAll(
@@ -345,7 +350,8 @@ const scrapePageByPage = async (
           "Accept-Language": "en-US,en;q=0.9",
           Accept:
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          Referer: currentUrl, // Dynamic referer
+          Referer: currentUrl,
+          "Upgrade-Insecure-Requests": "1",
         });
 
         for (const url of productUrls) {
@@ -383,13 +389,13 @@ const scrapePageByPage = async (
             });
             saveUrlsToFile(productDataArray, outputFileName);
           }
-          await delay(Math.random() * 2000 + 1000); // Random delay between 1-3 seconds
+          await delay(Math.random() * 4000 + 3000);
         }
 
         await productPage.close();
         currentUrl = nextPageUrl;
         currentPage++;
-        break; // Success, move to next page
+        break;
       } catch (error) {
         logProgress(
           "PAGE_SCRAPING",
@@ -405,12 +411,23 @@ const scrapePageByPage = async (
           currentUrl = null;
           break;
         }
-        await delay(2000);
+        // Recreate the page on failure to handle frame detachment
+        await page.close();
+        page = await browser.newPage();
+        await page.setUserAgent(getRandomUserAgent());
+        await page.setExtraHTTPHeaders({
+          "Accept-Language": "en-US,en;q=0.9",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          Referer: "https://www.amazon.com.tr/",
+          "Upgrade-Insecure-Requests": "1",
+        });
+        await delay(5000);
       }
     }
 
     if (currentUrl) {
-      await delay(Math.random() * 3000 + 2000); // Random delay between 2-5 seconds between pages
+      await delay(Math.random() * 10000 + 5000);
     }
   }
 };
@@ -461,29 +478,30 @@ const scrapeAmazonProducts = async () => {
         }
       }
 
-      const page = await browser.newPage();
-      await scrapePageByPage(
-        page,
-        baseUrl,
-        processedUrls,
-        productDataArray,
-        outputFileName
-      );
-      await page.close();
+      let page = await browser.newPage();
+      try {
+        await scrapePageByPage(
+          page,
+          baseUrl,
+          processedUrls,
+          productDataArray,
+          outputFileName
+        );
+      } finally {
+        await page.close();
+      }
 
       logProgress(
         "MAIN",
         `Completed ${baseUrl}: ${productDataArray.length} entries saved to ${outputFileName}`
       );
     }
-
+  } catch (error) {
+    console.error("[FATAL] Fatal error:", error);
+  } finally {
     if (browser) await browser.close();
     logProgress("MAIN", "Browser closed");
     process.exit(0);
-  } catch (error) {
-    console.error("[FATAL] Fatal error:", error);
-    if (browser) await browser.close();
-    process.exit(1);
   }
 };
 
