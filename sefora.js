@@ -44,10 +44,12 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs with footer detection, total products check, and scroll reset
+// Extract product URLs with improved loop handling
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
+  let retryCount = 0;
+  const maxRetries = 3; // Maximum number of scroll reset attempts
 
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
@@ -86,15 +88,14 @@ const extractProductUrls = async (page, baseUrl) => {
     );
   }
 
-  // Infinite scroll logic with footer detection and scroll reset
   let previousProductCount = 0;
   let noNewProductsTime = 0;
   const maxNoNewProductsTime = 5000; // 5 seconds
   const scrollStep = 500;
   const minProductsToCollect = totalProducts - 1;
 
-  while (!shouldStop) {
-    // Check if we've reached our target number of products
+  while (!shouldStop && retryCount < maxRetries) {
+    // Check if we've reached our target
     if (allProductUrls.size >= minProductsToCollect) {
       logProgress(
         "URL_COLLECTION",
@@ -122,27 +123,38 @@ const extractProductUrls = async (page, baseUrl) => {
     if (footerVisible) {
       logProgress("URL_COLLECTION", "Footer reached.");
       if (allProductUrls.size < minProductsToCollect) {
+        retryCount++;
         logProgress(
           "URL_COLLECTION",
-          `Only ${allProductUrls.size} products found out of ${totalProducts} expected. Scrolling to top and retrying.`
+          `Retry ${retryCount}/${maxRetries}: Only ${allProductUrls.size} products found out of ${totalProducts} expected.`
         );
 
-        // Scroll to top
-        await page.evaluate(() => {
-          window.scrollTo({ top: 0, behavior: "smooth" });
-        });
-        await delay(2000); // Wait for scroll to complete
+        if (retryCount >= maxRetries) {
+          logProgress(
+            "URL_COLLECTION",
+            `Max retries reached. Proceeding with ${allProductUrls.size} products.`
+          );
+          break;
+        }
 
-        // Scroll back down
+        // Improved scroll reset with slower scrolling
         await page.evaluate(async (step) => {
-          for (let i = 0; i < document.body.scrollHeight; i += step) {
+          // Scroll to top
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+
+          // Slower scroll down to ensure loading
+          let currentPosition = 0;
+          const maxHeight = document.body.scrollHeight;
+          while (currentPosition < maxHeight) {
             window.scrollBy(0, step);
-            await new Promise((resolve) => setTimeout(resolve, 100));
+            currentPosition += step;
+            await new Promise((resolve) => setTimeout(resolve, 200));
           }
         }, scrollStep);
 
-        logProgress("URL_COLLECTION", "Completed scroll reset");
-        continue; // Continue the loop after resetting scroll
+        logProgress("URL_COLLECTION", "Completed enhanced scroll reset");
+        continue;
       } else {
         break;
       }
@@ -161,7 +173,9 @@ const extractProductUrls = async (page, baseUrl) => {
         .filter((url) => url);
     });
 
+    const previousSize = allProductUrls.size;
     currentUrls.forEach((url) => allProductUrls.add(url));
+
     logProgress(
       "URL_COLLECTION",
       `Progress: ${allProductUrls.size}/${totalProducts} unique URLs collected`
@@ -175,10 +189,17 @@ const extractProductUrls = async (page, baseUrl) => {
           "URL_COLLECTION",
           `No new products for 5 seconds. Current count: ${allProductUrls.size}/${totalProducts}`
         );
-        if (allProductUrls.size < minProductsToCollect) {
+        if (
+          allProductUrls.size < minProductsToCollect &&
+          retryCount < maxRetries
+        ) {
+          retryCount++;
           logProgress(
             "URL_COLLECTION",
-            "Haven't reached target count. Continuing scroll."
+            `Retry ${retryCount}/${maxRetries}: Initiating scroll reset`
+          );
+          await page.evaluate(() =>
+            window.scrollTo({ top: 0, behavior: "smooth" })
           );
           noNewProductsTime = 0;
         } else {
