@@ -66,16 +66,30 @@ const extractProductUrls = async (page, baseUrl) => {
   await page.setUserAgent(getRandomUserAgent());
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
+  // Wait for product cards to load (increase wait time for dynamic content)
+  await page
+    .waitForSelector(".p-card-chldrn-cntnr.card-border", { timeout: 10000 })
+    .catch(() => {
+      logProgress(
+        "URL_COLLECTION",
+        "No product cards found after waiting. Page might not have loaded correctly."
+      );
+    });
+
   const totalProductsInfo = await page.evaluate(() => {
     const descElement = document.querySelector(".dscrptn.dscrptn-V2 h2");
     return descElement
       ? descElement.textContent
           .trim()
           .match(/([\d.]+)(\+)?\s+sonuç/)
-          ?.slice(1)
+          ?.slice(1) || [0, false]
       : [0, false];
   });
-  const totalProducts = parseFloat(totalProductsInfo[0]?.replace(".", "") || 0);
+
+  const totalProductsStr = totalProductsInfo[0]
+    ? String(totalProductsInfo[0])
+    : "0";
+  const totalProducts = parseFloat(totalProductsStr.replace(".", "") || 0);
   const isIndeterminate = !!totalProductsInfo[1];
 
   let allProductUrls = new Set();
@@ -86,10 +100,10 @@ const extractProductUrls = async (page, baseUrl) => {
   while (!shouldStop) {
     try {
       const currentUrls = await page.evaluate(() => {
-        return Array.from(
-          document.querySelectorAll(".p-card-chldrn-cntnr.card-border a")
-        )
-          .map((el) => el.getAttribute("href"))
+        const links = Array.from(
+          document.querySelectorAll(".p-card-chldrn-cntnr.card-border")
+        ).map((el) => el.getAttribute("href"));
+        return links
           .filter((url) => url && !url.includes("javascript:"))
           .map((url) =>
             url.startsWith("http")
@@ -104,17 +118,31 @@ const extractProductUrls = async (page, baseUrl) => {
         `Found ${allProductUrls.size} unique URLs so far...`
       );
 
+      // Debug: Log the first few URLs found (if any)
+      if (allProductUrls.size > 0) {
+        logProgress(
+          "URL_COLLECTION",
+          `Sample URLs: ${Array.from(allProductUrls).slice(0, 3).join(", ")}`
+        );
+      }
+
       if (!isIndeterminate && allProductUrls.size >= totalProducts) break;
 
       await page.evaluate(() => window.scrollBy(0, 1000));
-      await delay(2000);
+      await delay(3000); // Increased delay for dynamic loading
 
       const currentHeight = await page.evaluate(
         () => document.body.scrollHeight
       );
       if (currentHeight === previousHeight) {
         stagnantCount++;
-        if (stagnantCount >= maxStagnantAttempts) break;
+        if (stagnantCount >= maxStagnantAttempts) {
+          logProgress(
+            "URL_COLLECTION",
+            "Scroll height stagnant. Stopping scroll."
+          );
+          break;
+        }
       } else {
         stagnantCount = 0;
       }
@@ -125,8 +153,10 @@ const extractProductUrls = async (page, baseUrl) => {
           () =>
             window.scrollY + window.innerHeight >= document.body.scrollHeight
         )
-      )
+      ) {
+        logProgress("URL_COLLECTION", "Reached end of page.");
         break;
+      }
     } catch (error) {
       logProgress(
         "URL_COLLECTION",
@@ -134,6 +164,13 @@ const extractProductUrls = async (page, baseUrl) => {
       );
       await delay(2000);
     }
+  }
+
+  if (allProductUrls.size === 0) {
+    logProgress(
+      "URL_COLLECTION",
+      "No URLs found. Check selector or page load."
+    );
   }
 
   return {
@@ -337,7 +374,6 @@ const scrapeMultipleUrls = async () => {
         );
         saveProductsToFile(productsArray, outputFileName);
 
-        // Add random delay and recreate page periodically to prevent freezing
         await delay(1000 + Math.random() * 2000);
         if (i % 10 === 0 && i > 0) {
           await detailPage.close();
