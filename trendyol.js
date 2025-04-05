@@ -66,7 +66,7 @@ const extractProductUrls = async (page, baseUrl) => {
   await page.setUserAgent(getRandomUserAgent());
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-  // Wait for product cards to load (increase wait time for dynamic content)
+  // Wait for product cards to load
   await page
     .waitForSelector(".p-card-chldrn-cntnr.card-border", { timeout: 10000 })
     .catch(() => {
@@ -118,7 +118,6 @@ const extractProductUrls = async (page, baseUrl) => {
         `Found ${allProductUrls.size} unique URLs so far...`
       );
 
-      // Debug: Log the first few URLs found (if any)
       if (allProductUrls.size > 0) {
         logProgress(
           "URL_COLLECTION",
@@ -129,7 +128,7 @@ const extractProductUrls = async (page, baseUrl) => {
       if (!isIndeterminate && allProductUrls.size >= totalProducts) break;
 
       await page.evaluate(() => window.scrollBy(0, 1000));
-      await delay(3000); // Increased delay for dynamic loading
+      await delay(3000);
 
       const currentHeight = await page.evaluate(
         () => document.body.scrollHeight
@@ -350,7 +349,7 @@ const scrapeMultipleUrls = async () => {
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
 
-      const detailPage = await browser.newPage();
+      let detailPage = await browser.newPage(); // Changed to let
       await detailPage.setViewport({ width: 1366, height: 768 });
 
       for (let i = 0; i < productUrls.length && !shouldStop; i++) {
@@ -377,9 +376,8 @@ const scrapeMultipleUrls = async () => {
         await delay(1000 + Math.random() * 2000);
         if (i % 10 === 0 && i > 0) {
           await detailPage.close();
-          const newDetailPage = await browser.newPage();
-          await newDetailPage.setViewport({ width: 1366, height: 768 });
-          detailPage = newDetailPage;
+          detailPage = await browser.newPage(); // Reassign with let
+          await detailPage.setViewport({ width: 1366, height: 768 });
         }
       }
 
