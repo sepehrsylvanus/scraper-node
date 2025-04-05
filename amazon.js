@@ -23,42 +23,30 @@ const logProgress = (level, message) => {
   console.log(`[${new Date().toISOString()}] [${level}] ${message}`);
 };
 
-// Randomize user-agent
+// Large pool of realistic user agents
 const getRandomUserAgent = () => {
   const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/114.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36 Edg/112.0.1722.58",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0",
+    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPad; CPU OS 16_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Mobile/15E148 Safari/604.1",
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Load proxies from JSON file (matching n11 program's format)
-const loadProxiesFromFile = () => {
-  const proxyFile = path.join(__dirname, "proxies.json"); // ./proxies.json relative to script
-  if (!fs.existsSync(proxyFile)) {
-    throw new Error(`Proxy file ${proxyFile} not found`);
-  }
-  const data = JSON.parse(fs.readFileSync(proxyFile, "utf8"));
-  const proxies = data.proxies.map(
-    (proxy) => `http://${proxy.ip}:${proxy.port}`
-  );
-  logProgress("PROXY", `Loaded ${proxies.length} proxies from ${proxyFile}`);
-  return proxies;
-};
-
-// Launch browser with proxy and retry logic (matching n11 program)
-const launchBrowser = async (proxies, retries = 3) => {
-  if (!proxies.length) throw new Error("No proxies available");
-  const proxy = proxies[Math.floor(Math.random() * proxies.length)];
+// Launch browser without proxy
+const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
-      logProgress(
-        "BROWSER",
-        `Launching browser with proxy ${proxy} (attempt ${i + 1})...`
-      );
+      logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false,
+        headless: false, // Set to true for production if desired
         protocolTimeout: 180000,
         args: [
           "--no-sandbox",
@@ -67,7 +55,6 @@ const launchBrowser = async (proxies, retries = 3) => {
           "--start-maximized",
           "--disable-web-security",
           "--disable-features=IsolateOrigins,site-per-process",
-          `--proxy-server=${proxy}`,
           "--disable-sync",
           "--no-first-run",
           "--disable-telemetry",
@@ -77,6 +64,10 @@ const launchBrowser = async (proxies, retries = 3) => {
 
       const tempPage = await browser.newPage();
       await tempPage.setUserAgent(getRandomUserAgent());
+      await tempPage.goto("https://www.google.com", {
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      }); // Test connectivity
       await tempPage.close();
 
       logProgress("BROWSER", "Browser launched successfully");
@@ -90,12 +81,19 @@ const launchBrowser = async (proxies, retries = 3) => {
 };
 
 // Scrape product details with retry logic
-const scrapeProductDetails = async (page, url, retries = 2) => {
+const scrapeProductDetails = async (page, url, retries = 3) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await page.waitForSelector("#productTitle", { timeout: 20000 });
+      await page.setUserAgent(getRandomUserAgent());
+      await page.setExtraHTTPHeaders({
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        Referer: "https://www.amazon.com.tr/", // Random referer to mimic navigation
+      });
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+      await page.waitForSelector("#productTitle", { timeout: 30000 });
 
       const productData = await page.evaluate(() => {
         let price = null;
@@ -285,7 +283,7 @@ const scrapePageByPage = async (
   processedUrls,
   productDataArray,
   outputFileName,
-  retries = 2
+  retries = 3
 ) => {
   let currentPage = 1;
   const maxPages = 10;
@@ -295,6 +293,7 @@ const scrapePageByPage = async (
     "Accept-Language": "en-US,en;q=0.9",
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    Referer: "https://www.amazon.com.tr/",
   });
 
   let currentUrl = baseUrl;
@@ -307,9 +306,9 @@ const scrapePageByPage = async (
         );
         await page.goto(currentUrl, {
           waitUntil: "domcontentloaded",
-          timeout: 60000,
+          timeout: 90000,
         });
-        await page.waitForSelector(".puis-card-container", { timeout: 20000 });
+        await page.waitForSelector(".puis-card-container", { timeout: 30000 });
 
         const { productUrls, nextPageUrl } = await page.evaluate(() => {
           const productCards = document.querySelectorAll(
@@ -346,6 +345,7 @@ const scrapePageByPage = async (
           "Accept-Language": "en-US,en;q=0.9",
           Accept:
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          Referer: currentUrl, // Dynamic referer
         });
 
         for (const url of productUrls) {
@@ -383,7 +383,7 @@ const scrapePageByPage = async (
             });
             saveUrlsToFile(productDataArray, outputFileName);
           }
-          await delay(Math.random() * 1000 + 500);
+          await delay(Math.random() * 2000 + 1000); // Random delay between 1-3 seconds
         }
 
         await productPage.close();
@@ -410,7 +410,7 @@ const scrapePageByPage = async (
     }
 
     if (currentUrl) {
-      await delay(Math.random() * 2000 + 1000);
+      await delay(Math.random() * 3000 + 2000); // Random delay between 2-5 seconds between pages
     }
   }
 };
@@ -424,13 +424,10 @@ const scrapeAmazonProducts = async () => {
   }
 
   try {
-    const proxies = loadProxiesFromFile();
-    if (!proxies.length) throw new Error("No proxies found in ./proxies.json");
+    browser = await launchBrowser();
 
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
-
-    browser = await launchBrowser(proxies);
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing URL: ${baseUrl}`);
