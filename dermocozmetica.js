@@ -132,21 +132,20 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           price = parseFloat(priceText);
         }
 
-        const currencyElement = document.querySelector(
-          ".product-current-price"
+        const specificationsElement = document.querySelector(
+          ".product-specifications"
         );
-        const currency = currencyElement
-          ? currencyElement.textContent.trim().match(/TL/)?.[0] || "TL"
-          : "TL";
+        const specifications = specificationsElement
+          ? Array.from(specificationsElement.querySelectorAll("tr"))
+              .map((row) => {
+                const key = row.querySelector("th").textContent.trim();
+                const value = row.querySelector("td").textContent.trim();
+                return { key, value };
+              })
+              .filter((spec) => spec.key && spec.value)
+          : [];
 
-        const imageElements = document.querySelectorAll(
-          ".product-images-gallery img"
-        );
-        const images = Array.from(imageElements)
-          .map((img) => img.getAttribute("src"))
-          .filter((src) => src && !src.includes("placeholder.gif"));
-
-        return { title, brand, price, currency, images };
+        return { title, brand, price, specifications };
       });
 
       return {
@@ -160,9 +159,8 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
         currency: productData.currency || "TL",
         images: productData.images.length ? productData.images.join(";") : "",
         rating: null,
-        reviewCount: 0,
-        discount: "",
-        features: [],
+
+        specifications: [],
       };
     } catch (error) {
       logProgress(
