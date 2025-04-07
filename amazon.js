@@ -1,6 +1,7 @@
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
 
 const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(outputDir)) {
@@ -33,21 +34,28 @@ const getRandomUserAgent = () => {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Load proxies from JSON file (matching n11 program's format)
-const loadProxiesFromFile = () => {
-  const proxyFile = path.join(__dirname, "proxies.json"); // ./proxies.json relative to script
-  if (!fs.existsSync(proxyFile)) {
-    throw new Error(`Proxy file ${proxyFile} not found`);
-  }
-  const data = JSON.parse(fs.readFileSync(proxyFile, "utf8"));
-  const proxies = data.proxies.map(
-    (proxy) => `http://${proxy.ip}:${proxy.port}`
-  );
-  logProgress("PROXY", `Loaded ${proxies.length} proxies from ${proxyFile}`);
-  return proxies;
+// Fetch proxies from ProxyScrape API
+const fetchProxies = () => {
+  return new Promise((resolve, reject) => {
+    const url =
+      "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all";
+    https
+      .get(url, (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          const proxies = data
+            .split("\n")
+            .filter((line) => line.trim() !== "")
+            .map((proxy) => `http://${proxy.trim()}`);
+          resolve(proxies.slice(0, 5)); // Limit to 5 proxies for this example
+        });
+      })
+      .on("error", (err) => reject(err));
+  });
 };
 
-// Launch browser with proxy and retry logic (matching n11 program)
+// Launch browser with proxy and retry logic
 const launchBrowser = async (proxies, retries = 3) => {
   if (!proxies.length) throw new Error("No proxies available");
   const proxy = proxies[Math.floor(Math.random() * proxies.length)];
@@ -415,7 +423,7 @@ const scrapePageByPage = async (
   }
 };
 
-// Main scraping function
+// Main scraping function with automatic proxy fetching
 const scrapeAmazonProducts = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
@@ -423,9 +431,20 @@ const scrapeAmazonProducts = async () => {
     process.exit(1);
   }
 
+  let proxies = [];
   try {
-    const proxies = loadProxiesFromFile();
-    if (!proxies.length) throw new Error("No proxies found in ./proxies.json");
+    proxies = await fetchProxies();
+    logProgress(
+      "PROXY",
+      `Fetched ${proxies.length} proxies: ${proxies.join(", ")}`
+    );
+  } catch (error) {
+    logProgress("PROXY", `Failed to fetch proxies: ${error.message}`);
+    proxies = ["http://192.168.1.1:8080"]; // Fallback proxy (fictional)
+  }
+
+  try {
+    if (!proxies.length) throw new Error("No proxies available");
 
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
