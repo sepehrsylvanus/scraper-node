@@ -233,72 +233,96 @@ const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-  const productData = await page.evaluate(() => {
-    const productTile = document.querySelector(".product-tile.clickable");
-    const data = productTile
-      ? JSON.parse(productTile.getAttribute("data-tcproduct"))
-      : {};
+  const productData = await page.evaluate((url) => {
+    const productIdMatch = url.match(/P(\d+)/);
+    const productId = productIdMatch ? productIdMatch[1] : "";
 
-    const priceElement = document.querySelector(".price-sales-standard");
+    const priceElement = document.querySelector(
+      ".price-sales.price-sales-standard"
+    );
     const priceText = priceElement ? priceElement.textContent.trim() : "";
-    const priceMatch = priceText.match(/([\d.,]+)\s*TL/);
+    const priceMatch = priceText.match(/([\d.,]+)/);
     const price = priceMatch
       ? parseFloat(priceMatch[1].replace(".", "").replace(",", "."))
       : null;
 
-    const brandElement = document.querySelector(".product-brand");
-    const titleElement = document.querySelector(".product-title");
-    const ratingIcons = document.querySelectorAll(".product-rating-icon");
-    const reviewCountElement = document.querySelector(".amount-of-reviews");
-    const images = document.querySelectorAll(".product-imgs img");
-    const variationElement = document.querySelector(".product-variation-name");
+    const ratingElement = document.querySelector(".bv-overall-score");
+    const rating = ratingElement
+      ? ratingElement.textContent.trim().split("/")[0]
+      : null;
 
-    let rating = 0;
-    ratingIcons.forEach((icon) => {
-      if (icon.src.includes("rating-star-full-icon")) rating += 1;
-      else if (icon.tagName === "svg") rating += 0.5;
-    });
+    const specificationsElement = document.querySelector(".specification");
+    const specifications = specificationsElement
+      ? Array.from(specificationsElement.querySelectorAll("li")).map(
+          (spec) => ({
+            name: spec.querySelector(".name").textContent.trim(),
+            value: spec.querySelector(".value").textContent.trim(),
+          })
+        )
+      : [];
 
-    return {
-      productId: data.product_pid || "",
-      brand: brandElement
-        ? brandElement.textContent.trim()
-        : data.product_brand || "",
-      title: titleElement
-        ? titleElement.textContent.trim()
-        : data.product_pid_name || "",
-      price: price,
-      currency: "TRY",
-      images: Array.from(images)
-        .map((img) => img.src)
-        .join(";"),
-      rating: rating || null,
-      specifications: [
-        {
-          name: "Variation",
-          value: variationElement ? variationElement.textContent.trim() : "",
-        },
-      ],
-      categories: data.product_breadcrumb_label || "",
-      description: "",
-    };
-  });
+    const breadcrumbElement = document.querySelector(
+      ".breadcrumb.pdp-breadcrumb"
+    );
+    const breadcrumbItems = breadcrumbElement
+      ? Array.from(breadcrumbElement.querySelectorAll(".breadcrumb-element"))
+      : [];
+    const categories = breadcrumbItems
+      .slice(0, -1)
+      .map((item) => item.querySelector("a").textContent.trim())
+      .join(" > ");
 
-  return {
-    url,
-    productId: productData.productId,
-    brand: productData.brand,
-    title: productData.title,
-    price: productData.price,
-    currency: productData.currency,
-    images: productData.images,
-    rating: productData.rating,
-    specifications: productData.specifications.filter((spec) => spec.value),
-    categories: productData.categories,
-    description: productData.description,
-  };
+    const titleElement = document.querySelector(".product-name");
+    const title = titleElement ? titleElement.textContent.trim() : "";
+
+    const brandElement = document.querySelector(".brand-name");
+    const brand = brandElement ? brandElement.textContent.trim() : "";
+
+    const descriptionElement = document.querySelector(
+      ".description-content.product-description-box"
+    );
+    const description = descriptionElement ? descriptionElement.innerHTML : "";
+
+    // Click on "Daha fazla" link to expand description
+    const readMoreLink = document.querySelector(".read-more-pdp-description");
+    if (readMoreLink) {
+      readMoreLink.click();
+      // Wait for description to expand
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          const expandedDescription = document.querySelector(
+            ".description-ellipsis-wrapper"
+          );
+          resolve({
+            productId,
+            brand,
+            title,
+            price,
+            rating,
+            specifications,
+            categories,
+            description: expandedDescription
+              ? expandedDescription.innerHTML
+              : "",
+          });
+        }, 1000);
+      });
+    } else {
+      return {
+        productId,
+        brand,
+        title,
+        price,
+        rating,
+        specifications,
+        categories,
+        description,
+      };
+    }
+  }, url);
+
+  return productData;
 };
-
 // Save data to file
 const saveUrlsToFile = (data, filePath) => {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
