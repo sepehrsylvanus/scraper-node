@@ -29,42 +29,57 @@ const getRandomUserAgent = () => {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Launch browser with retry logic and cleanup
-const launchBrowser = async (retries = 3) => {
+// Load proxies from JSON file (matching n11 program's format)
+const loadProxiesFromFile = () => {
+  const proxyFile = path.join(__dirname, "proxies.json"); // ./proxies.json relative to script
+  if (!fs.existsSync(proxyFile)) {
+    throw new Error(`Proxy file ${proxyFile} not found`);
+  }
+  const data = JSON.parse(fs.readFileSync(proxyFile, "utf8"));
+  const proxies = data.proxies.map(
+    (proxy) => `http://${proxy.ip}:${proxy.port}`
+  );
+  logProgress("PROXY", `Loaded ${proxies.length} proxies from ${proxyFile}`);
+  return proxies;
+};
+
+// Launch browser with proxy and retry logic (matching n11 program)
+const launchBrowser = async (proxies, retries = 3) => {
+  if (!proxies.length) throw new Error("No proxies available");
+  const proxy = proxies[Math.floor(Math.random() * proxies.length)];
   for (let i = 0; i < retries; i++) {
     try {
-      logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
+      logProgress(
+        "BROWSER",
+        `Launching browser with proxy ${proxy} (attempt ${i + 1})...`
+      );
       browser = await puppeteer.launch({
         headless: false,
-        protocolTimeout: 120000, // Increased timeout to 120s
+        protocolTimeout: 180000,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--disable-accelerated-2d-canvas",
+          "--start-maximized",
+          "--disable-web-security",
+          "--disable-features=IsolateOrigins,site-per-process",
+          `--proxy-server=${proxy}`,
+          "--disable-sync",
           "--no-first-run",
-          "--disable-gpu",
-          "--disable-background-timer-throttling",
-          "--disable-backgrounding-occluded-windows",
-          "--disable-renderer-backgrounding",
+          "--disable-telemetry",
         ],
-        defaultViewport: { width: 1280, height: 800 },
-        // Handle SIGTERM to gracefully close browser
-        handleSIGTERM: true,
-        handleSIGHUP: true,
+        defaultViewport: null,
       });
 
-      // Ensure browser cleanup on process exit
-      process.on("SIGINT", async () => {
-        await browser.close();
-        process.exit(0);
-      });
+      const tempPage = await browser.newPage();
+      await tempPage.setUserAgent(getRandomUserAgent());
+      await tempPage.close();
 
+      logProgress("BROWSER", "Browser launched successfully");
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
@@ -74,154 +89,166 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Scrape product details from individual product page
-const scrapeProductDetails = async (page, url) => {
+// Scrape product details with retry logic
+const scrapeProductDetails = async (page, url, retries = 2) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
-  try {
-    await page.goto(url, { waitUntil: "networkidle0", timeout: 60000 });
-    await page.waitForSelector("#productTitle", { timeout: 15000 });
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.waitForSelector("#productTitle", { timeout: 20000 });
 
-    const productData = await page.evaluate(() => {
-      let price = null;
-      let currency = "";
-      const wholePriceElement = document.querySelector("span.a-price-whole");
-      const fractionPriceElement = document.querySelector(
-        "span.a-price-fraction"
-      );
-      const currencyElement = document.querySelector("span.a-price-symbol");
-      if (wholePriceElement && fractionPriceElement && currencyElement) {
-        const wholePriceText = wholePriceElement.textContent.replace(
-          /[^0-9]/g,
-          ""
+      const productData = await page.evaluate(() => {
+        let price = null;
+        let currency = "";
+        const wholePriceElement = document.querySelector("span.a-price-whole");
+        const fractionPriceElement = document.querySelector(
+          "span.a-price-fraction"
         );
-        const fractionPrice = fractionPriceElement.textContent.padStart(2, "0");
-        currency = currencyElement.textContent;
-        price = parseFloat(`${wholePriceText}.${fractionPrice}`);
-        if (price > 100) price = price / 1000;
-      }
-
-      const productIdMatch = window.location.href.match(/\/dp\/([A-Z0-9]{10})/);
-      const productId = productIdMatch ? productIdMatch[1] : "";
-
-      let brand = "";
-      const techTableRows = document.querySelectorAll(
-        "#productDetails_techSpec_section_1 tr"
-      );
-      for (const row of techTableRows) {
-        const th = row.querySelector("th");
-        const td = row.querySelector("td");
-        if (th && td && th.textContent.trim() === "Marka Adı") {
-          brand = td.textContent.trim().replace("‎", "");
-          break;
+        const currencyElement = document.querySelector("span.a-price-symbol");
+        if (wholePriceElement && fractionPriceElement && currencyElement) {
+          const wholePriceText = wholePriceElement.textContent.replace(
+            /[^0-9]/g,
+            ""
+          );
+          const fractionPrice = fractionPriceElement.textContent.padStart(
+            2,
+            "0"
+          );
+          currency = currencyElement.textContent;
+          price = parseFloat(`${wholePriceText}.${fractionPrice}`);
+          if (price > 100) price = price / 1000;
         }
-      }
 
-      const titleElement = document.querySelector("#productTitle");
-      const title = titleElement ? titleElement.textContent.trim() : "";
+        const productIdMatch =
+          window.location.href.match(/\/dp\/([A-Z0-9]{10})/);
+        const productId = productIdMatch ? productIdMatch[1] : "";
 
-      const imageElements = document.querySelectorAll(
-        "#altImages .imageThumbnail img"
-      );
-      const videoElements = document.querySelectorAll(
-        "#altImages .videoThumbnail img"
-      );
-      let allImages = [];
-      imageElements.forEach((img) => {
-        const src = img.getAttribute("src");
-        if (src && !allImages.includes(src)) allImages.push(src);
-      });
-      videoElements.forEach((videoImg) => {
-        const src = videoImg.getAttribute("src");
-        if (src && !allImages.includes(src)) allImages.push(src);
-      });
-      const imagesString = allImages.join(";");
-
-      let rating = null;
-      const ratingElement = document.querySelector(
-        "#acrPopover .a-size-base.a-color-base"
-      );
-      if (ratingElement) {
-        const ratingText = ratingElement.textContent.trim().replace(",", ".");
-        rating = parseFloat(ratingText);
-      }
-
-      const specifications = [];
-      const specRows = document.querySelectorAll(
-        "#productDetails_techSpec_section_1 tr"
-      );
-      specRows.forEach((row) => {
-        const nameElement = row.querySelector("th");
-        const valueElement = row.querySelector("td");
-        if (nameElement && valueElement) {
-          const name = nameElement.textContent.trim();
-          const value = valueElement.textContent.trim().replace("‎", "");
-          specifications.push({ name, value });
-        }
-      });
-
-      const categoryElements = document.querySelectorAll(
-        "ul.a-unordered-list.a-horizontal .a-list-item a.a-link-normal"
-      );
-      const categories = Array.from(categoryElements)
-        .map((el) => el.textContent.trim())
-        .join(">");
-
-      let description = "";
-      const featureBullets = document.querySelector("#feature-bullets");
-      if (featureBullets) {
-        const listItems = featureBullets.querySelectorAll(
-          "ul.a-unordered-list.a-vertical.a-spacing-mini li span.a-list-item"
+        let brand = "";
+        const techTableRows = document.querySelectorAll(
+          "#productDetails_techSpec_section_1 tr"
         );
-        description = Array.from(listItems)
-          .map((item) => item.textContent.trim())
-          .join("\n");
-      }
+        for (const row of techTableRows) {
+          const th = row.querySelector("th");
+          const td = row.querySelector("td");
+          if (th && td && th.textContent.trim() === "Marka Adı") {
+            brand = td.textContent.trim().replace("‎", "");
+            break;
+          }
+        }
+
+        const titleElement = document.querySelector("#productTitle");
+        const title = titleElement ? titleElement.textContent.trim() : "";
+
+        const imageElements = document.querySelectorAll(
+          "#altImages .imageThumbnail img"
+        );
+        const videoElements = document.querySelectorAll(
+          "#altImages .videoThumbnail img"
+        );
+        let allImages = [];
+        imageElements.forEach((img) => {
+          const src = img.getAttribute("src");
+          if (src && !allImages.includes(src)) allImages.push(src);
+        });
+        videoElements.forEach((videoImg) => {
+          const src = videoImg.getAttribute("src");
+          if (src && !allImages.includes(src)) allImages.push(src);
+        });
+        const imagesString = allImages.join(";");
+
+        let rating = null;
+        const ratingElement = document.querySelector(
+          "#acrPopover .a-size-base.a-color-base"
+        );
+        if (ratingElement) {
+          const ratingText = ratingElement.textContent.trim().replace(",", ".");
+          rating = parseFloat(ratingText);
+        }
+
+        const specifications = [];
+        const specRows = document.querySelectorAll(
+          "#productDetails_techSpec_section_1 tr"
+        );
+        specRows.forEach((row) => {
+          const nameElement = row.querySelector("th");
+          const valueElement = row.querySelector("td");
+          if (nameElement && valueElement) {
+            const name = nameElement.textContent.trim();
+            const value = valueElement.textContent.trim().replace("‎", "");
+            specifications.push({ name, value });
+          }
+        });
+
+        const categoryElements = document.querySelectorAll(
+          "ul.a-unordered-list.a-horizontal .a-list-item a.a-link-normal"
+        );
+        const categories = Array.from(categoryElements)
+          .map((el) => el.textContent.trim())
+          .join(">");
+
+        let description = "";
+        const featureBullets = document.querySelector("#feature-bullets");
+        if (featureBullets) {
+          const listItems = featureBullets.querySelectorAll(
+            "ul.a-unordered-list.a-vertical.a-spacing-mini li span.a-list-item"
+          );
+          description = Array.from(listItems)
+            .map((item) => item.textContent.trim())
+            .join("\n");
+        }
+
+        return {
+          price,
+          currency,
+          productId,
+          brand,
+          title,
+          images: imagesString,
+          rating,
+          specifications,
+          categories,
+          description,
+        };
+      });
 
       return {
-        price,
-        currency,
-        productId,
-        brand,
-        title,
-        images: imagesString,
-        rating,
-        specifications,
-        categories,
-        description,
+        url,
+        productId: productData.productId,
+        brand: productData.brand,
+        title: productData.title || "",
+        price:
+          productData.price !== null
+            ? parseFloat(productData.price.toFixed(3))
+            : null,
+        currency: productData.currency,
+        images: productData.images || "",
+        rating: productData.rating !== null ? productData.rating : null,
+        specifications: productData.specifications || [],
+        categories: productData.categories || "",
+        description: productData.description || "",
       };
-    });
-
-    return {
-      url,
-      productId: productData.productId,
-      brand: productData.brand,
-      title: productData.title || "",
-      price:
-        productData.price !== null
-          ? parseFloat(productData.price.toFixed(3))
-          : null,
-      currency: productData.currency,
-      images: productData.images || "",
-      rating: productData.rating !== null ? productData.rating : null,
-      specifications: productData.specifications || [],
-      categories: productData.categories || "",
-      description: productData.description || "",
-    };
-  } catch (error) {
-    logProgress("PRODUCT_SCRAPING", `Error scraping product: ${error.message}`);
-    return {
-      url,
-      productId: "",
-      brand: "",
-      title: "",
-      price: null,
-      currency: "",
-      images: "",
-      rating: null,
-      specifications: [],
-      categories: "",
-      description: "",
-    };
+    } catch (error) {
+      logProgress(
+        "PRODUCT_SCRAPING",
+        `Attempt ${attempt + 1} failed: ${error.message}`
+      );
+      if (attempt === retries - 1) {
+        return {
+          url,
+          productId: "",
+          brand: "",
+          title: "",
+          price: null,
+          currency: "",
+          images: "",
+          rating: null,
+          specifications: [],
+          categories: "",
+          description: "",
+        };
+      }
+      await delay(2000);
+    }
   }
 };
 
@@ -251,88 +278,159 @@ const loadExistingUrls = (baseUrl, dir) => {
   return existingUrls;
 };
 
-// Scrape products from a single page
-const scrapeSinglePage = async (page, url, processedUrls, productDataArray) => {
-  try {
-    await page.goto(url, { waitUntil: "networkidle0", timeout: 60000 });
-    await page.waitForSelector(".puis-card-container", { timeout: 15000 });
-    logProgress("PAGE_SCRAPING", `Loaded page: ${url}`);
+// Scrape products page by page with retry logic
+const scrapePageByPage = async (
+  page,
+  baseUrl,
+  processedUrls,
+  productDataArray,
+  outputFileName,
+  retries = 2
+) => {
+  let currentPage = 1;
+  const maxPages = 10;
 
-    const productUrls = await page.evaluate(() => {
-      const productCards = document.querySelectorAll(".puis-card-container");
-      return Array.from(productCards)
-        .map((card) => {
-          const link = card.querySelector("a.a-link-normal.s-no-outline");
-          return link ? link.getAttribute("href") : null;
-        })
-        .filter((url) => url && url.includes("/dp/"))
-        .map((url) =>
-          url.startsWith("http") ? url : `https://www.amazon.com.tr${url}`
-        );
-    });
+  await page.setUserAgent(getRandomUserAgent());
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "en-US,en;q=0.9",
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  });
 
-    logProgress(
-      "PAGE_SCRAPING",
-      `Found ${productUrls.length} product URLs on ${url}`
-    );
-
-    for (const productUrl of productUrls) {
-      if (processedUrls.has(productUrl)) {
+  let currentUrl = baseUrl;
+  while (currentPage <= maxPages && currentUrl) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
         logProgress(
           "PAGE_SCRAPING",
-          `Skipping already processed URL: ${productUrl}`
+          `Navigating to page ${currentPage}: ${currentUrl}`
         );
-        continue;
-      }
-      const productPage = await browser.newPage();
-      try {
+        await page.goto(currentUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
+        await page.waitForSelector(".puis-card-container", { timeout: 20000 });
+
+        const { productUrls, nextPageUrl } = await page.evaluate(() => {
+          const productCards = document.querySelectorAll(
+            ".puis-card-container"
+          );
+          const productUrls = Array.from(productCards)
+            .map((card) => {
+              const link = card.querySelector("a.a-link-normal.s-no-outline");
+              return link ? link.getAttribute("href") : null;
+            })
+            .filter((url) => url && url.includes("/dp/"))
+            .map((url) =>
+              url.startsWith("http") ? url : `https://www.amazon.com.tr${url}`
+            );
+
+          const nextButton = document.querySelector(
+            'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
+          );
+          const nextPageUrl = nextButton
+            ? `https://www.amazon.com.tr${nextButton.getAttribute("href")}`
+            : null;
+
+          return { productUrls, nextPageUrl };
+        });
+
+        logProgress(
+          "PAGE_SCRAPING",
+          `Found ${productUrls.length} product URLs on page ${currentPage}`
+        );
+
+        const productPage = await browser.newPage();
         await productPage.setUserAgent(getRandomUserAgent());
-        const productData = await scrapeProductDetails(productPage, productUrl);
-        productDataArray.push(productData);
-        processedUrls.add(productUrl);
+        await productPage.setExtraHTTPHeaders({
+          "Accept-Language": "en-US,en;q=0.9",
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        });
+
+        for (const url of productUrls) {
+          if (processedUrls.has(url)) {
+            logProgress(
+              "PAGE_SCRAPING",
+              `Skipping already processed URL: ${url}`
+            );
+            continue;
+          }
+
+          try {
+            const productData = await scrapeProductDetails(productPage, url);
+            productDataArray.push(productData);
+            processedUrls.add(url);
+            logProgress("PAGE_SCRAPING", `Scraped ${url} successfully`);
+            saveUrlsToFile(productDataArray, outputFileName);
+          } catch (error) {
+            logProgress(
+              "PAGE_SCRAPING",
+              `Failed to scrape ${url}: ${error.message}`
+            );
+            productDataArray.push({
+              url,
+              productId: "",
+              brand: "",
+              title: "",
+              price: null,
+              currency: "",
+              images: "",
+              rating: null,
+              specifications: [],
+              categories: "",
+              description: "",
+            });
+            saveUrlsToFile(productDataArray, outputFileName);
+          }
+          await delay(Math.random() * 1000 + 500);
+        }
+
+        await productPage.close();
+        currentUrl = nextPageUrl;
+        currentPage++;
+        break; // Success, move to next page
       } catch (error) {
         logProgress(
           "PAGE_SCRAPING",
-          `Failed to scrape product ${productUrl}: ${error.message}`
+          `Attempt ${attempt + 1} failed for page ${currentPage}: ${
+            error.message
+          }`
         );
-      } finally {
-        await productPage.close(); // Ensure page is closed even on error
+        if (attempt === retries - 1) {
+          logProgress(
+            "PAGE_SCRAPING",
+            `Max retries reached for page ${currentPage}. Moving on.`
+          );
+          currentUrl = null;
+          break;
+        }
+        await delay(2000);
       }
-      await delay(Math.random() * 1000 + 500); // Random delay between 0.5-1.5s
     }
 
-    const nextPageUrl = await page.evaluate(() => {
-      const nextButton = document.querySelector(
-        'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
-      );
-      return nextButton
-        ? `https://www.amazon.com.tr${nextButton.getAttribute("href")}`
-        : null;
-    });
-
-    return nextPageUrl;
-  } catch (error) {
-    logProgress(
-      "PAGE_SCRAPING",
-      `Error scraping page ${url}: ${error.message}`
-    );
-    return null;
+    if (currentUrl) {
+      await delay(Math.random() * 2000 + 1000);
+    }
   }
 };
 
-// Main scraping function with better resource management
+// Main scraping function
 const scrapeAmazonProducts = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
-    console.error("Usage: node script.js <url>");
+    console.error("Usage: node scraper.js <url>");
     process.exit(1);
   }
 
   try {
+    const proxies = loadProxiesFromFile();
+    if (!proxies.length) throw new Error("No proxies found in ./proxies.json");
+
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
 
-    browser = await launchBrowser();
+    browser = await launchBrowser(proxies);
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing URL: ${baseUrl}`);
@@ -366,50 +464,15 @@ const scrapeAmazonProducts = async () => {
         }
       }
 
-      let currentUrl = baseUrl;
-      const maxPages = 1000; // Adjust based on your needs
-      let pageCount = 1;
-
-      while (currentUrl && pageCount <= maxPages) {
-        const page = await browser.newPage();
-        try {
-          await page.setUserAgent(getRandomUserAgent());
-          await page.setExtraHTTPHeaders({
-            "Accept-Language": "en-US,en;q=0.9",
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          });
-
-          logProgress("MAIN", `Scraping page ${pageCount} of ${maxPages}`);
-          currentUrl = await scrapeSinglePage(
-            page,
-            currentUrl,
-            processedUrls,
-            productDataArray
-          );
-          saveUrlsToFile(productDataArray, outputFileName);
-        } catch (error) {
-          logProgress("MAIN", `Error on page ${pageCount}: ${error.message}`);
-        } finally {
-          await page.close(); // Ensure page is closed even on error
-        }
-
-        pageCount++;
-
-        if (productDataArray.length >= 40000) {
-          logProgress("MAIN", "Reached target of 40,000 products. Stopping.");
-          break;
-        }
-
-        await delay(Math.random() * 2000 + 1000); // Random delay between 1-3s
-
-        // Periodically restart browser to prevent memory leaks
-        if (pageCount % 50 === 0) {
-          logProgress("MAIN", "Restarting browser to free resources...");
-          await browser.close();
-          browser = await launchBrowser();
-        }
-      }
+      const page = await browser.newPage();
+      await scrapePageByPage(
+        page,
+        baseUrl,
+        processedUrls,
+        productDataArray,
+        outputFileName
+      );
+      await page.close();
 
       logProgress(
         "MAIN",
