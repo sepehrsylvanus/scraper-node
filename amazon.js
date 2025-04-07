@@ -29,11 +29,11 @@ const logProgress = (level, message) => {
 // Enhanced pool of user agents
 const getRandomUserAgent = () => {
   const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1",
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
@@ -44,7 +44,7 @@ const launchBrowser = async (retries = 3) => {
     try {
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false,
+        headless: "new", // Use new headless mode
         protocolTimeout: 180000,
         args: [
           "--no-sandbox",
@@ -55,18 +55,34 @@ const launchBrowser = async (retries = 3) => {
           "--disable-blink-features=AutomationControlled",
           "--disable-web-security",
           "--disable-xss-auditor",
-          // Add proxy support (configure your proxy here)
+          "--disable-notifications",
+          "--disable-infobars",
+          "--window-size=1280,800",
+          // Uncomment and configure proxy if available
           // "--proxy-server=http://your-proxy:port",
         ],
         defaultViewport: { width: 1280, height: 800 },
       });
+
+      // Spoof additional browser features
+      const page = await browser.newPage();
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        Object.defineProperty(navigator, "languages", {
+          get: () => ["en-US", "en"],
+        });
+        Object.defineProperty(navigator, "plugins", {
+          get: () => [1, 2, 3, 4, 5],
+        });
+      });
+      await page.close();
 
       logProgress("BROWSER", "Browser launched successfully");
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
       if (i === retries - 1) throw error;
-      await delay(2000);
+      await delay(5000);
     }
   }
 };
@@ -75,20 +91,33 @@ const launchBrowser = async (retries = 3) => {
 const simulateHumanBehavior = async (page) => {
   try {
     await page.evaluate(() => {
-      const x = Math.floor(Math.random() * 800) + 200;
-      const y = Math.floor(Math.random() * 600) + 100;
+      const scrollHeight = document.body.scrollHeight;
+      const randomScroll = Math.floor(Math.random() * (scrollHeight - 800));
       window.scrollTo({
-        top: y,
-        left: x,
+        top: randomScroll,
         behavior: "smooth",
       });
     });
+
     // Random mouse movements
-    await page.mouse.move(Math.random() * 800 + 200, Math.random() * 600 + 100);
-    await delay(Math.random() * 1500 + 1000);
+    await page.mouse.move(
+      Math.random() * 800 + 200,
+      Math.random() * 600 + 100,
+      { steps: 10 }
+    );
+
+    // Random typing simulation
+    await page.keyboard.press("ArrowDown");
+    await delay(Math.random() * 2000 + 1000);
   } catch (error) {
     logProgress("SIMULATION", `Failed to simulate behavior: ${error.message}`);
   }
+};
+
+// Check for "Üzgünüz" page
+const checkForSorryPage = async (page) => {
+  const content = await page.content();
+  return content.includes("Üzgünüz") || content.includes("Sorry");
 };
 
 // Get total products count
@@ -101,14 +130,13 @@ const getTotalProducts = async (page) => {
       return element ? element.textContent.trim() : "";
     });
 
-    if (!resultText) return 48; // Default to one page if not found
+    if (!resultText) return 48;
 
     const match = resultText.match(
       /(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?) \/ (\d+(?:\.\d+)?(?:\.\d+)?) üzeri sonuç/
     );
     if (match) {
-      const total = parseInt(match[3].replace(/\./g, ""));
-      return total;
+      return parseInt(match[3].replace(/\./g, ""));
     }
 
     const simpleMatch = resultText.match(/(\d+(?:\.\d+)?) sonuç/);
@@ -116,7 +144,7 @@ const getTotalProducts = async (page) => {
       return parseInt(simpleMatch[1].replace(/\./g, ""));
     }
 
-    return 48; // Default fallback
+    return 48;
   } catch (error) {
     logProgress("TOTAL", `Error getting total products: ${error.message}`);
     return 48;
@@ -130,20 +158,26 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
     try {
       await page.setUserAgent(getRandomUserAgent());
       await page.setExtraHTTPHeaders({
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": "en-US,en;q=0.9,tr-TR;q=0.8",
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         Referer: "https://www.amazon.com.tr/",
         "Upgrade-Insecure-Requests": "1",
         "Cache-Control": "no-cache",
         Pragma: "no-cache",
+        Connection: "keep-alive",
       });
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+
+      await page.goto(url, { waitUntil: "networkidle0", timeout: 90000 });
+
+      if (await checkForSorryPage(page)) {
+        throw new Error("Detected Üzgünüz page");
+      }
+
       await page.waitForSelector("#productTitle", { timeout: 30000 });
       await simulateHumanBehavior(page);
 
       const productData = await page.evaluate(() => {
-        // Same product data extraction logic as before
         let price = null;
         let currency = "";
         const wholePriceElement = document.querySelector("span.a-price-whole");
@@ -293,7 +327,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           description: "",
         };
       }
-      await delay(5000);
+      await delay(10000); // Increased delay on retry
     }
   }
 };
@@ -345,13 +379,14 @@ const scrapePageByPage = async (
 
   await page.setUserAgent(getRandomUserAgent());
   await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9,tr-TR;q=0.8",
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     Referer: "https://www.amazon.com.tr/",
     "Upgrade-Insecure-Requests": "1",
     "Cache-Control": "no-cache",
     Pragma: "no-cache",
+    Connection: "keep-alive",
   });
 
   let currentUrl = baseUrl;
@@ -363,9 +398,28 @@ const scrapePageByPage = async (
           `Navigating to page ${currentPage}: ${currentUrl}`
         );
         await page.goto(currentUrl, {
-          waitUntil: "domcontentloaded",
+          waitUntil: "networkidle0",
           timeout: 90000,
         });
+
+        if (await checkForSorryPage(page)) {
+          logProgress(
+            "PAGE_SCRAPING",
+            "Detected Üzgünüz page, retrying with new page..."
+          );
+          await page.close();
+          page = await browser.newPage();
+          await page.setUserAgent(getRandomUserAgent());
+          await page.setExtraHTTPHeaders({
+            "Accept-Language": "en-US,en;q=0.9,tr-TR;q=0.8",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            Referer: "https://www.amazon.com.tr/",
+            "Upgrade-Insecure-Requests": "1",
+          });
+          throw new Error("Üzgünüz page detected");
+        }
+
         await page.waitForSelector(".puis-card-container", { timeout: 30000 });
         await simulateHumanBehavior(page);
 
@@ -401,7 +455,7 @@ const scrapePageByPage = async (
         const productPage = await browser.newPage();
         await productPage.setUserAgent(getRandomUserAgent());
         await productPage.setExtraHTTPHeaders({
-          "Accept-Language": "en-US,en;q=0.9",
+          "Accept-Language": "en-US,en;q=0.9,tr-TR;q=0.8",
           Accept:
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
           Referer: currentUrl,
@@ -443,7 +497,7 @@ const scrapePageByPage = async (
             });
             saveUrlsToFile(productDataArray, outputFileName);
           }
-          await delay(Math.random() * 4000 + 3000);
+          await delay(Math.random() * 5000 + 5000); // Increased delay between products
         }
 
         await productPage.close();
@@ -465,22 +519,12 @@ const scrapePageByPage = async (
           currentUrl = null;
           break;
         }
-        await page.close();
-        page = await browser.newPage();
-        await page.setUserAgent(getRandomUserAgent());
-        await page.setExtraHTTPHeaders({
-          "Accept-Language": "en-US,en;q=0.9",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          Referer: "https://www.amazon.com.tr/",
-          "Upgrade-Insecure-Requests": "1",
-        });
-        await delay(5000);
+        await delay(15000); // Increased delay between retries
       }
     }
 
     if (currentUrl) {
-      await delay(Math.random() * 10000 + 5000);
+      await delay(Math.random() * 15000 + 10000); // Increased page transition delay
     }
   }
 };
