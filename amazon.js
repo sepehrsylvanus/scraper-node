@@ -1,4 +1,4 @@
-const { firefox } = require("playwright"); // Use Playwright instead of Puppeteer
+const { firefox } = require("playwright");
 const fs = require("fs");
 const path = require("path");
 
@@ -33,16 +33,45 @@ const getRandomUserAgent = () => {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
+// Simulate human-like mouse movements
+const simulateHumanBehavior = async (page) => {
+  await page.mouse.move(Math.random() * 800 + 100, Math.random() * 600 + 100);
+  await delay(Math.random() * 500 + 200);
+  await page.mouse.move(Math.random() * 800 + 100, Math.random() * 600 + 100);
+  await page.evaluate(() => window.scrollBy(0, Math.random() * 300 + 100));
+  await delay(Math.random() * 1000 + 500);
+};
+
+// Check for CAPTCHA/"Üzgünüz" page
+const checkForCaptcha = async (page) => {
+  const content = await page.content();
+  const isCaptcha =
+    content.includes("Üzgünüz") ||
+    content.includes("Sorry") ||
+    content.includes("prove you are not a robot") ||
+    content.includes("g-recaptcha");
+
+  if (isCaptcha) {
+    logProgress("CAPTCHA", "Detected CAPTCHA/Üzgünüz page!");
+    logProgress("CAPTCHA", "Please solve the CAPTCHA manually in the browser.");
+    logProgress("CAPTCHA", "Waiting 60 seconds for manual resolution...");
+    await delay(60000); // Wait for manual solving
+    return true;
+  }
+  return false;
+};
+
 // Launch Firefox browser
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       logProgress("BROWSER", `Launching Firefox (attempt ${i + 1})...`);
       browser = await firefox.launch({
-        headless: false, // Set to true for production
+        headless: false,
         firefoxUserPrefs: {
           "network.protocol-handler.warn-external.http": false,
           "network.protocol-handler.warn-external.https": false,
+          "privacy.trackingprotection.enabled": false, // Disable tracking protection
         },
         args: ["--no-sandbox", "--start-maximized"],
       });
@@ -50,10 +79,28 @@ const launchBrowser = async (retries = 3) => {
       const context = await browser.newContext({
         viewport: null,
         userAgent: getRandomUserAgent(),
+        acceptDownloads: true,
+        locale: "en-US",
       });
 
+      // Set cookies to mimic a logged-in user
+      await context.addCookies([
+        {
+          name: "session-id",
+          value: `session-${Date.now()}`,
+          domain: ".amazon.com.tr",
+          path: "/",
+        },
+        {
+          name: "i18n-prefs",
+          value: "USD",
+          domain: ".amazon.com.tr",
+          path: "/",
+        },
+      ]);
+
       logProgress("BROWSER", "Firefox launched successfully");
-      return context; // Return context instead of browser directly
+      return context;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
       if (i === retries - 1) throw error;
@@ -68,6 +115,13 @@ const scrapeProductDetails = async (page, url, retries = 2) => {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+
+      if (await checkForCaptcha(page)) {
+        // Recheck after CAPTCHA resolution
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+      }
+
+      await simulateHumanBehavior(page);
       await page.waitForSelector("#productTitle", { timeout: 20000 });
 
       const productData = await page.evaluate(() => {
@@ -252,6 +306,8 @@ const scrapePageByPage = async (
     "Accept-Language": "en-US,en;q=0.9",
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
   });
 
   while (currentPage <= maxPages && currentUrl) {
@@ -265,6 +321,16 @@ const scrapePageByPage = async (
           waitUntil: "domcontentloaded",
           timeout: 60000,
         });
+
+        if (await checkForCaptcha(page)) {
+          // Recheck after CAPTCHA resolution
+          await page.goto(currentUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: 60000,
+          });
+        }
+
+        await simulateHumanBehavior(page);
         await page.waitForSelector(".puis-card-container", { timeout: 20000 });
 
         const { productUrls, nextPageUrl } = await page.evaluate(() => {
@@ -308,7 +374,7 @@ const scrapePageByPage = async (
           processedUrls.add(url);
           logProgress("PAGE_SCRAPING", `Scraped ${url} successfully`);
           saveUrlsToFile(productDataArray, outputFileName);
-          await delay(Math.random() * 1000 + 500);
+          await delay(Math.random() * 2000 + 1000); // Increased delay
         }
 
         currentUrl = nextPageUrl;
@@ -329,10 +395,10 @@ const scrapePageByPage = async (
           currentUrl = null;
           break;
         }
-        await delay(2000);
+        await delay(3000); // Increased retry delay
       }
     }
-    if (currentUrl) await delay(Math.random() * 2000 + 1000);
+    if (currentUrl) await delay(Math.random() * 3000 + 2000); // Increased page delay
   }
 };
 
@@ -349,7 +415,7 @@ const scrapeAmazonProducts = async () => {
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
 
     const context = await launchBrowser();
-    browser = context.browser(); // Store browser reference for cleanup
+    browser = context.browser();
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing URL: ${baseUrl}`);
