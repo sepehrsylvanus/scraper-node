@@ -36,43 +36,70 @@ const getRandomUserAgent = () => {
     "Mozilla/5.0 (iPad; CPU OS 16_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.7 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Windows NT 10.0; rv:122.0) Gecko/20100101 Firefox/122.0",
   ];
-
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Launch browser with headless: false
+// Proxy configuration (add your proxy here)
+const proxyList = [
+  // Example: "http://username:password@proxy-host:port",
+  // Add multiple proxies to rotate
+];
+const getRandomProxy = () => {
+  return proxyList.length > 0
+    ? proxyList[Math.floor(Math.random() * proxyList.length)]
+    : null;
+};
+
+// Launch browser with enhanced stealth
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
+      const proxy = getRandomProxy();
+      const args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-web-security",
+        "--disable-xss-auditor",
+        "--disable-notifications",
+        "--disable-infobars",
+        `--window-size=${Math.floor(Math.random() * 400) + 1000},${
+          Math.floor(Math.random() * 300) + 700
+        }`,
+      ];
+      if (proxy) args.push(`--proxy-server=${proxy}`);
+
       browser = await puppeteer.launch({
         headless: false,
         protocolTimeout: 180000,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--no-first-run",
-          "--disable-gpu",
-          "--disable-blink-features=AutomationControlled",
-          "--disable-web-security",
-          "--disable-xss-auditor",
-          "--disable-notifications",
-          "--disable-infobars",
-          "--window-size=1280,800",
-          // "--proxy-server=http://your-proxy:port", // Uncomment if using proxy
-        ],
-        defaultViewport: { width: 1280, height: 800 },
+        args,
+        defaultViewport: {
+          width: Math.floor(Math.random() * 400) + 1000,
+          height: Math.floor(Math.random() * 300) + 700,
+        },
       });
 
       const page = await browser.newPage();
       await page.evaluateOnNewDocument(() => {
         Object.defineProperty(navigator, "webdriver", { get: () => false });
         Object.defineProperty(navigator, "languages", {
-          get: () => ["en-US", "en"],
+          get: () => ["en-US", "en", "tr-TR"],
         });
         Object.defineProperty(navigator, "plugins", {
           get: () => [1, 2, 3, 4, 5],
+        });
+        Object.defineProperty(navigator, "hardwareConcurrency", {
+          get: () => Math.floor(Math.random() * 4) + 2,
+        });
+        Object.defineProperty(window, "outerWidth", {
+          get: () => Math.floor(Math.random() * 400) + 1000,
+        });
+        Object.defineProperty(window, "outerHeight", {
+          get: () => Math.floor(Math.random() * 300) + 700,
         });
       });
       await page.close();
@@ -107,7 +134,7 @@ const simulateHumanBehavior = async (page) => {
   }
 };
 
-// Check for "Üzgünüz" or CAPTCHA page
+// Check for blocking pages
 const checkForBlockingPage = async (page) => {
   const content = await page.content();
   const isSorryPage = content.includes("Üzgünüz") || content.includes("Sorry");
@@ -172,9 +199,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
       });
 
       await page.goto(url, { waitUntil: "networkidle0", timeout: 90000 });
-      const { isSorryPage, isCaptchaPage } = await НапримерcheckForBlockingPage(
-        page
-      );
+      const { isSorryPage, isCaptchaPage } = await checkForBlockingPage(page);
 
       if (isSorryPage) throw new Error("Detected Üzgünüz page");
       if (isCaptchaPage) {
@@ -274,7 +299,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
         });
 
         const categoryElements = document.querySelectorAll(
-          "ul.a-unordered-list.a-horizontal .a-list-item.a-breadcrumb-item a.a-link-normal"
+          "ul.a-unordered-list.a-horizontal .a-list-item a.a-link-normal"
         );
         const categories = Array.from(categoryElements)
           .map((el) => el.textContent.trim())
@@ -372,13 +397,13 @@ const loadExistingUrls = (baseUrl, dir) => {
   return existingUrls;
 };
 
-// Scrape products page by page with improved logic
+// Scrape products page by page
 const scrapePageByPage = async (
   baseUrl,
   processedUrls,
   productDataArray,
   outputFileName,
-  browserRetries = 2
+  browserRetries = 3
 ) => {
   let currentPage = 1;
   let page;
@@ -387,7 +412,7 @@ const scrapePageByPage = async (
   while (browserAttempt < browserRetries) {
     try {
       if (!browser || !browser.isConnected()) {
-        if (browser) await browser.close();
+        if (browser) await browser.close().catch(() => {});
         browser = await launchBrowser();
       }
 
@@ -430,7 +455,10 @@ const scrapePageByPage = async (
               page
             );
             if (isSorryPage) {
-              logProgress("PAGE_SCRAPING", "Detected Üzgünüz page");
+              logProgress(
+                "PAGE_SCRAPING",
+                "Detected Üzgünüz page. Switching browser..."
+              );
               throw new Error("Üzgünüz page detected");
             }
             if (isCaptchaPage) {
@@ -560,7 +588,7 @@ const scrapePageByPage = async (
       }
 
       await page.close();
-      return; // Success, exit the function
+      return;
     } catch (error) {
       logProgress(
         "PAGE_SCRAPING",
@@ -571,7 +599,7 @@ const scrapePageByPage = async (
         logProgress("PAGE_SCRAPING", "Restarting browser...");
         if (page) await page.close().catch(() => {});
         if (browser) await browser.close().catch(() => {});
-        await delay(30000); // Wait longer before restarting
+        await delay(30000);
       } else {
         throw new Error("Max browser retries reached");
       }
