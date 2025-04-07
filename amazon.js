@@ -1,7 +1,6 @@
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
-const https = require("https");
 
 const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(outputDir)) {
@@ -34,85 +33,35 @@ const getRandomUserAgent = () => {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Fetch proxies from ProxyScrape API
-const fetchProxies = () => {
-  return new Promise((resolve, reject) => {
-    const url =
-      "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all";
-    https
-      .get(url, (res) => {
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          const proxies = data
-            .split("\n")
-            .filter((line) => line.trim() !== "")
-            .map((proxy) => `http://${proxy.trim()}`);
-          resolve(proxies.slice(0, 5));
-        });
-      })
-      .on("error", (err) => {
-        logProgress("PROXY", `Proxy fetch failed: ${err.message}`);
-        resolve([]); // Return empty array on failure
-      });
-  });
-};
-
-// Launch browser with optional proxy
-const launchBrowser = async (proxies, retries = 3) => {
-  let useProxy = proxies.length > 0;
-  for (let i = 0; i < retries; i++) {
-    try {
-      const args = [
+// Launch browser without proxy for simplicity
+const launchBrowser = async () => {
+  try {
+    logProgress("BROWSER", "Launching browser without proxy...");
+    browser = await puppeteer.launch({
+      headless: false, // Keep false for debugging
+      protocolTimeout: 180000,
+      args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--start-maximized",
-      ];
-      let proxy;
-      if (useProxy) {
-        proxy = proxies[Math.floor(Math.random() * proxies.length)];
-        logProgress(
-          "BROWSER",
-          `Launching with proxy ${proxy} (attempt ${i + 1})...`
-        );
-        args.push(`--proxy-server=${proxy}`);
-      } else {
-        logProgress("BROWSER", `Launching without proxy (attempt ${i + 1})...`);
-      }
+      ],
+      defaultViewport: null,
+    });
 
-      browser = await puppeteer.launch({
-        headless: false, // Keep false for debugging
-        protocolTimeout: 180000,
-        args,
-        defaultViewport: null,
-      });
+    const page = await browser.newPage();
+    await page.setUserAgent(getRandomUserAgent());
+    await page.goto("https://www.google.com", {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+    logProgress("BROWSER", "Successfully connected to Google");
+    await page.close();
 
-      const page = await browser.newPage();
-      await page.setUserAgent(getRandomUserAgent());
-      // Test connectivity with a simple page
-      await page.goto("https://www.google.com", {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
-      });
-      logProgress("BROWSER", "Successfully connected to Google");
-      await page.close();
-
-      logProgress("BROWSER", "Browser launched successfully");
-      return browser;
-    } catch (error) {
-      console.error(`Launch attempt ${i + 1} failed:`, error.message);
-      if (i === retries - 1) {
-        if (useProxy) {
-          logProgress("BROWSER", "Proxy failed, retrying without proxy...");
-          useProxy = false; // Switch to no proxy for next retry
-          i = -1; // Reset retry count
-          continue;
-        }
-        throw error;
-      }
-      await delay(2000);
-    }
+    logProgress("BROWSER", "Browser launched successfully");
+    return browser;
+  } catch (error) {
+    throw new Error(`Browser launch failed: ${error.message}`);
   }
 };
 
@@ -210,19 +159,11 @@ const scrapeAmazonProducts = async () => {
     process.exit(1);
   }
 
-  let proxies = [];
-  try {
-    proxies = await fetchProxies();
-    logProgress("PROXY", `Fetched ${proxies.length} proxies`);
-  } catch (error) {
-    logProgress("PROXY", "Proceeding without proxies");
-  }
-
   try {
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
 
-    browser = await launchBrowser(proxies);
+    browser = await launchBrowser();
 
     const page = await browser.newPage();
     await page.setUserAgent(getRandomUserAgent());
@@ -241,34 +182,35 @@ const scrapeAmazonProducts = async () => {
         `products_${dateStr}_${urlSlug}.json`
       );
 
-      // Test base URL connectivity
-      logProgress("MAIN", `Testing connectivity to ${baseUrl}`);
-      try {
-        await page.goto(baseUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: 60000,
-        });
-        logProgress("MAIN", `Successfully reached ${baseUrl}`);
-      } catch (error) {
-        logProgress("MAIN", `Failed to reach ${baseUrl}: ${error.message}`);
-        continue; // Skip to next URL if base fails
-      }
+      logProgress("MAIN", `Navigating to ${baseUrl}`);
+      await page.goto(baseUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
 
-      // Scrape product URLs from the page
+      // Scrape product URLs with updated selector
       const productUrls = await page.evaluate(() => {
-        return Array.from(
+        const links = Array.from(
           document.querySelectorAll(
-            ".puis-card-container a.a-link-normal.s-no-outline"
+            ".s-result-item a.s-no-outline[href*='/dp/']"
           )
-        )
-          .map((link) => link.getAttribute("href"))
-          .filter((url) => url && url.includes("/dp/"))
-          .map((url) =>
-            url.startsWith("http") ? url : `https://www.amazon.com.tr${url}`
-          );
+        );
+        return links.map((link) => {
+          const href = link.getAttribute("href");
+          return href.startsWith("http")
+            ? href
+            : `https://www.amazon.com.tr${href}`;
+        });
       });
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
+      if (productUrls.length === 0) {
+        const htmlSnippet = await page.content();
+        logProgress(
+          "DEBUG",
+          `No products found. Page snippet: ${htmlSnippet.substring(0, 500)}...`
+        );
+      }
 
       for (const url of productUrls) {
         const productData = await scrapeProductDetails(page, url);
