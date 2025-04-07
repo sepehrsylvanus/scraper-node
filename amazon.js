@@ -3,7 +3,6 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const fs = require("fs");
 const path = require("path");
 
-// Add stealth plugin to Puppeteer
 puppeteer.use(StealthPlugin());
 
 const outputDir = path.join(__dirname, "output");
@@ -27,25 +26,25 @@ const logProgress = (level, message) => {
   console.log(`[${new Date().toISOString()}] [${level}] ${message}`);
 };
 
-// Large pool of realistic user agents
+// Enhanced pool of user agents
 const getRandomUserAgent = () => {
   const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/114.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Launch browser with stealth enhancements
+// Launch browser with enhanced stealth features
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false, // Set to true for headless mode
+        headless: false,
         protocolTimeout: 180000,
         args: [
           "--no-sandbox",
@@ -53,6 +52,11 @@ const launchBrowser = async (retries = 3) => {
           "--disable-dev-shm-usage",
           "--no-first-run",
           "--disable-gpu",
+          "--disable-blink-features=AutomationControlled",
+          "--disable-web-security",
+          "--disable-xss-auditor",
+          // Add proxy support (configure your proxy here)
+          // "--proxy-server=http://your-proxy:port",
         ],
         defaultViewport: { width: 1280, height: 800 },
       });
@@ -67,21 +71,59 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Simulate human-like behavior
+// Enhanced human-like behavior simulation
 const simulateHumanBehavior = async (page) => {
   try {
     await page.evaluate(() => {
       const x = Math.floor(Math.random() * 800) + 200;
       const y = Math.floor(Math.random() * 600) + 100;
-      window.scrollTo(x, y);
+      window.scrollTo({
+        top: y,
+        left: x,
+        behavior: "smooth",
+      });
     });
-    await delay(Math.random() * 1000 + 500);
+    // Random mouse movements
+    await page.mouse.move(Math.random() * 800 + 200, Math.random() * 600 + 100);
+    await delay(Math.random() * 1500 + 1000);
   } catch (error) {
     logProgress("SIMULATION", `Failed to simulate behavior: ${error.message}`);
   }
 };
 
-// Scrape product details with retry logic
+// Get total products count
+const getTotalProducts = async (page) => {
+  try {
+    const resultText = await page.evaluate(() => {
+      const element = document.querySelector(
+        ".s-breadcrumb .a-size-base.a-spacing-small.a-spacing-top-small.a-text-normal span"
+      );
+      return element ? element.textContent.trim() : "";
+    });
+
+    if (!resultText) return 48; // Default to one page if not found
+
+    const match = resultText.match(
+      /(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?) \/ (\d+(?:\.\d+)?(?:\.\d+)?) üzeri sonuç/
+    );
+    if (match) {
+      const total = parseInt(match[3].replace(/\./g, ""));
+      return total;
+    }
+
+    const simpleMatch = resultText.match(/(\d+(?:\.\d+)?) sonuç/);
+    if (simpleMatch) {
+      return parseInt(simpleMatch[1].replace(/\./g, ""));
+    }
+
+    return 48; // Default fallback
+  } catch (error) {
+    logProgress("TOTAL", `Error getting total products: ${error.message}`);
+    return 48;
+  }
+};
+
+// Scrape product details
 const scrapeProductDetails = async (page, url, retries = 3) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -93,12 +135,15 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         Referer: "https://www.amazon.com.tr/",
         "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
       });
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
       await page.waitForSelector("#productTitle", { timeout: 30000 });
       await simulateHumanBehavior(page);
 
       const productData = await page.evaluate(() => {
+        // Same product data extraction logic as before
         let price = null;
         let currency = "";
         const wholePriceElement = document.querySelector("span.a-price-whole");
@@ -279,7 +324,7 @@ const loadExistingUrls = (baseUrl, dir) => {
   return existingUrls;
 };
 
-// Scrape products page by page with retry logic
+// Scrape products page by page
 const scrapePageByPage = async (
   page,
   baseUrl,
@@ -289,7 +334,14 @@ const scrapePageByPage = async (
   retries = 3
 ) => {
   let currentPage = 1;
-  const maxPages = 5;
+  const productsPerPage = 48;
+  const totalProducts = await getTotalProducts(page);
+  const maxPages = Math.ceil(totalProducts / productsPerPage);
+
+  logProgress(
+    "PAGE_SCRAPING",
+    `Total products: ${totalProducts}, Max pages: ${maxPages}`
+  );
 
   await page.setUserAgent(getRandomUserAgent());
   await page.setExtraHTTPHeaders({
@@ -298,6 +350,8 @@ const scrapePageByPage = async (
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     Referer: "https://www.amazon.com.tr/",
     "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
   });
 
   let currentUrl = baseUrl;
@@ -411,7 +465,6 @@ const scrapePageByPage = async (
           currentUrl = null;
           break;
         }
-        // Recreate the page on failure to handle frame detachment
         await page.close();
         page = await browser.newPage();
         await page.setUserAgent(getRandomUserAgent());
