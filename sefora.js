@@ -44,12 +44,12 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs with improved loop handling
+// Extract product URLs with improved logic to reach total products
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
   let retryCount = 0;
-  const maxRetries = 3; // Maximum number of scroll reset attempts
+  const maxRetries = 5; // Increased retries for robustness
 
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
@@ -61,6 +61,11 @@ const extractProductUrls = async (page, baseUrl) => {
       : 0;
   });
   logProgress("URL_COLLECTION", `Total products expected: ${totalProducts}`);
+
+  if (totalProducts === 0) {
+    logProgress("URL_COLLECTION", "No products found on page. Exiting.");
+    return [];
+  }
 
   // Initial scroll and button handling
   try {
@@ -90,76 +95,11 @@ const extractProductUrls = async (page, baseUrl) => {
 
   let previousProductCount = 0;
   let noNewProductsTime = 0;
-  const maxNoNewProductsTime = 5000; // 5 seconds
+  const maxNoNewProductsTime = 10000; // Increased to 10 seconds
   const scrollStep = 500;
-  const minProductsToCollect = totalProducts - 1;
+  const minProductsToCollect = totalProducts;
 
-  while (!shouldStop && retryCount < maxRetries) {
-    // Check if we've reached our target
-    if (allProductUrls.size >= minProductsToCollect) {
-      logProgress(
-        "URL_COLLECTION",
-        `Reached target of ${minProductsToCollect} products. Stopping scroll.`
-      );
-      break;
-    }
-
-    // Check if footer is visible
-    const footerVisible = await page.evaluate(() => {
-      const footer = document.querySelector(
-        ".content-asset.footer-reinssurance"
-      );
-      if (footer) {
-        const rect = footer.getBoundingClientRect();
-        return (
-          rect.top >= 0 &&
-          rect.bottom <=
-            (window.innerHeight || document.documentElement.clientHeight)
-        );
-      }
-      return false;
-    });
-
-    if (footerVisible) {
-      logProgress("URL_COLLECTION", "Footer reached.");
-      if (allProductUrls.size < minProductsToCollect) {
-        retryCount++;
-        logProgress(
-          "URL_COLLECTION",
-          `Retry ${retryCount}/${maxRetries}: Only ${allProductUrls.size} products found out of ${totalProducts} expected.`
-        );
-
-        if (retryCount >= maxRetries) {
-          logProgress(
-            "URL_COLLECTION",
-            `Max retries reached. Proceeding with ${allProductUrls.size} products.`
-          );
-          break;
-        }
-
-        // Improved scroll reset with slower scrolling
-        await page.evaluate(async (step) => {
-          // Scroll to top
-          window.scrollTo({ top: 0, behavior: "smooth" });
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-
-          // Slower scroll down to ensure loading
-          let currentPosition = 0;
-          const maxHeight = document.body.scrollHeight;
-          while (currentPosition < maxHeight) {
-            window.scrollBy(0, step);
-            currentPosition += step;
-            await new Promise((resolve) => setTimeout(resolve, 200));
-          }
-        }, scrollStep);
-
-        logProgress("URL_COLLECTION", "Completed enhanced scroll reset");
-        continue;
-      } else {
-        break;
-      }
-    }
-
+  while (!shouldStop && allProductUrls.size < minProductsToCollect) {
     // Get current product URLs
     const currentUrls = await page.evaluate(() => {
       const productElements = document.querySelectorAll(
@@ -181,13 +121,28 @@ const extractProductUrls = async (page, baseUrl) => {
       `Progress: ${allProductUrls.size}/${totalProducts} unique URLs collected`
     );
 
-    // Check if new products were loaded
+    // Check if footer is visible (indicating end of page)
+    const footerVisible = await page.evaluate(() => {
+      const footer = document.querySelector(
+        ".content-asset.footer-reinssurance"
+      );
+      if (footer) {
+        const rect = footer.getBoundingClientRect();
+        return (
+          rect.top >= 0 &&
+          rect.bottom <=
+            (window.innerHeight || document.documentElement.clientHeight)
+        );
+      }
+      return false;
+    });
+
     if (allProductUrls.size === previousProductCount) {
       noNewProductsTime += 1000;
       if (noNewProductsTime >= maxNoNewProductsTime) {
         logProgress(
           "URL_COLLECTION",
-          `No new products for 5 seconds. Current count: ${allProductUrls.size}/${totalProducts}`
+          `No new products for 10 seconds. Current count: ${allProductUrls.size}/${totalProducts}`
         );
         if (
           allProductUrls.size < minProductsToCollect &&
@@ -196,19 +151,56 @@ const extractProductUrls = async (page, baseUrl) => {
           retryCount++;
           logProgress(
             "URL_COLLECTION",
-            `Retry ${retryCount}/${maxRetries}: Initiating scroll reset`
+            `Retry ${retryCount}/${maxRetries}: Resetting scroll and waiting for load`
           );
-          await page.evaluate(() =>
-            window.scrollTo({ top: 0, behavior: "smooth" })
-          );
+
+          // Enhanced retry logic: scroll to top and slowly scroll down
+          await page.evaluate(async (step) => {
+            window.scrollTo({ top: 0, behavior: "smooth" });
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            let currentPosition = 0;
+            const maxHeight = document.body.scrollHeight;
+            while (currentPosition < maxHeight) {
+              window.scrollBy(0, step);
+              currentPosition += step;
+              await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+          }, scrollStep);
+
+          // Wait longer after reset to ensure content loads
+          await delay(5000);
           noNewProductsTime = 0;
-        } else {
+        } else if (allProductUrls.size < minProductsToCollect) {
+          logProgress(
+            "URL_COLLECTION",
+            `Max retries exhausted. Proceeding with ${allProductUrls.size}/${totalProducts} products`
+          );
           break;
         }
       }
     } else {
       noNewProductsTime = 0;
       previousProductCount = allProductUrls.size;
+    }
+
+    if (footerVisible && allProductUrls.size < minProductsToCollect) {
+      logProgress(
+        "URL_COLLECTION",
+        `Footer reached but only ${allProductUrls.size}/${totalProducts} collected. Retrying...`
+      );
+      retryCount++;
+      if (retryCount >= maxRetries) {
+        logProgress(
+          "URL_COLLECTION",
+          `Max retries reached with footer visible. Proceeding with ${allProductUrls.size} products`
+        );
+        break;
+      }
+      await page.evaluate(() =>
+        window.scrollTo({ top: 0, behavior: "smooth" })
+      );
+      await delay(5000); // Wait for potential reload
+      continue;
     }
 
     // Scroll down
@@ -218,7 +210,12 @@ const extractProductUrls = async (page, baseUrl) => {
     await delay(1000);
   }
 
-  if (allProductUrls.size < minProductsToCollect) {
+  if (allProductUrls.size >= minProductsToCollect) {
+    logProgress(
+      "URL_COLLECTION",
+      `Successfully collected ${allProductUrls.size}/${totalProducts} products`
+    );
+  } else {
     logProgress(
       "URL_COLLECTION",
       `Warning: Only collected ${allProductUrls.size} out of ${totalProducts} expected products`
@@ -228,7 +225,7 @@ const extractProductUrls = async (page, baseUrl) => {
   return Array.from(allProductUrls);
 };
 
-// Scrape product details from individual product page
+// Scrape product details from individual product page (unchanged)
 const scrapeProductDetails = async (page, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
@@ -283,11 +280,9 @@ const scrapeProductDetails = async (page, url) => {
     );
     const description = descriptionElement ? descriptionElement.innerHTML : "";
 
-    // Click on "Daha fazla" link to expand description
     const readMoreLink = document.querySelector(".read-more-pdp-description");
     if (readMoreLink) {
       readMoreLink.click();
-      // Wait for description to expand
       return new Promise((resolve) => {
         setTimeout(() => {
           const expandedDescription = document.querySelector(
@@ -323,6 +318,7 @@ const scrapeProductDetails = async (page, url) => {
 
   return productData;
 };
+
 // Save data to file
 const saveUrlsToFile = (data, filePath) => {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
@@ -353,7 +349,7 @@ const loadExistingUrls = (baseUrl, dir) => {
 const scrapeSephoraUrls = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
-    console.error("Usage: node script.js <url1> <url2> ...");
+    console.error("Usage: node sephora.js <url1> <url2> ...");
     process.exit(1);
   }
 
@@ -421,6 +417,7 @@ const scrapeSephoraUrls = async () => {
 
         try {
           const productData = await scrapeProductDetails(productPage, url);
+          productData.url = url; // Ensure URL is included in the data
           productDataArray.push(productData);
           logProgress(
             "MAIN",
