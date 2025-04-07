@@ -38,13 +38,13 @@ const getRandomUserAgent = () => {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Launch browser with enhanced stealth features
+// Launch browser with headless: false for screen interaction
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: false, // Use new headless mode
+        headless: false, // Visible browser for interaction
         protocolTimeout: 180000,
         args: [
           "--no-sandbox",
