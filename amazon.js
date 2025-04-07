@@ -54,7 +54,7 @@ const fetchProxies = () => {
             .split("\n")
             .filter((line) => line.trim() !== "")
             .map((proxy) => `http://${proxy.trim()}`);
-          resolve(proxyList.slice(0, 5)); // Limit to 5 proxies for this example
+          resolve(proxyList.slice(0, 5)); // Limit to 5 proxies
         });
       })
       .on("error", (err) => reject(err));
@@ -179,7 +179,7 @@ const promptUser = async (message) => {
   });
 };
 
-// Get total products count
+// Updated getTotalProducts function
 const getTotalProducts = async (page) => {
   try {
     const resultText = await page.evaluate(() => {
@@ -189,13 +189,26 @@ const getTotalProducts = async (page) => {
       return element ? element.textContent.trim() : "";
     });
 
-    if (!resultText) return 48;
-    const match = resultText.match(
-      /(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?) \/ (\d+(?:\.\d+)?(?:\.\d+)?) üzeri sonuç/
-    );
-    if (match) return parseInt(match[3].replace(/\./g, ""));
+    if (!resultText) {
+      logProgress("TOTAL", "No result text found, defaulting to 48");
+      return 48;
+    }
+
+    // Match patterns like "1-48 / 40.000 üzeri sonuç" or "1-48 / 40000 sonuç"
+    const overMatch = resultText.match(/(\d+(?:\.\d+)?) üzeri sonuç/);
     const simpleMatch = resultText.match(/(\d+(?:\.\d+)?) sonuç/);
-    if (simpleMatch) return parseInt(simpleMatch[1].replace(/\./g, ""));
+
+    if (overMatch) {
+      const total = parseInt(overMatch[1].replace(/\./g, ""));
+      logProgress("TOTAL", `Parsed total products from 'überi': ${total}`);
+      return total;
+    } else if (simpleMatch) {
+      const total = parseInt(simpleMatch[1].replace(/\./g, ""));
+      logProgress("TOTAL", `Parsed total products from 'sonuç': ${total}`);
+      return total;
+    }
+
+    logProgress("TOTAL", "No matching pattern found, defaulting to 48");
     return 48;
   } catch (error) {
     logProgress("TOTAL", `Error getting total products: ${error.message}`);
