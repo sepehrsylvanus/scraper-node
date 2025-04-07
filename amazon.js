@@ -1,7 +1,6 @@
-const puppeteer = require("puppeteer");
+const { firefox } = require("playwright"); // Use Playwright instead of Puppeteer
 const fs = require("fs");
 const path = require("path");
-const https = require("https");
 
 const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(outputDir)) {
@@ -27,73 +26,34 @@ const logProgress = (level, message) => {
 // Randomize user-agent
 const getRandomUserAgent = () => {
   const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:90.0) Gecko/20100101 Firefox/90.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:88.0) Gecko/20100101 Firefox/88.0",
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Fetch proxies from ProxyScrape API
-const fetchProxies = () => {
-  return new Promise((resolve, reject) => {
-    const url =
-      "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all";
-    https
-      .get(url, (res) => {
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          const proxies = data
-            .split("\n")
-            .filter((line) => line.trim() !== "")
-            .map((proxy) => `http://${proxy.trim()}`);
-          resolve(proxies.slice(0, 5)); // Limit to 5 proxies
-        });
-      })
-      .on("error", (err) => reject(err));
-  });
-};
-
-// Launch browser with proxy or direct connection
-const launchBrowser = async (proxies, retries = 3) => {
-  let proxy = proxies.length
-    ? proxies[Math.floor(Math.random() * proxies.length)]
-    : null;
+// Launch Firefox browser
+const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
-      const args = [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--start-maximized",
-      ];
-      if (proxy) {
-        logProgress(
-          "BROWSER",
-          `Launching browser with proxy ${proxy} (attempt ${i + 1})...`
-        );
-        args.push(`--proxy-server=${proxy}`);
-      } else {
-        logProgress(
-          "BROWSER",
-          `Launching browser without proxy (attempt ${i + 1})...`
-        );
-      }
-
-      browser = await puppeteer.launch({
+      logProgress("BROWSER", `Launching Firefox (attempt ${i + 1})...`);
+      browser = await firefox.launch({
         headless: false, // Set to true for production
-        protocolTimeout: 180000,
-        args,
-        defaultViewport: null,
+        firefoxUserPrefs: {
+          "network.protocol-handler.warn-external.http": false,
+          "network.protocol-handler.warn-external.https": false,
+        },
+        args: ["--no-sandbox", "--start-maximized"],
       });
 
-      const tempPage = await browser.newPage();
-      await tempPage.setUserAgent(getRandomUserAgent());
-      await tempPage.close();
+      const context = await browser.newContext({
+        viewport: null,
+        userAgent: getRandomUserAgent(),
+      });
 
-      logProgress("BROWSER", "Browser launched successfully");
-      return browser;
+      logProgress("BROWSER", "Firefox launched successfully");
+      return context; // Return context instead of browser directly
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
       if (i === retries - 1) throw error;
@@ -129,7 +89,7 @@ const scrapeProductDetails = async (page, url, retries = 2) => {
           );
           currency = currencyElement.textContent;
           price = parseFloat(`${wholePriceText}.${fractionPrice}`);
-          if (price > 100) price = price / 1000; // Adjust for possible formatting issues
+          if (price > 100) price = price / 1000;
         }
 
         const productIdMatch =
@@ -288,7 +248,6 @@ const scrapePageByPage = async (
   const maxPages = 10;
   let currentUrl = baseUrl;
 
-  await page.setUserAgent(getRandomUserAgent());
   await page.setExtraHTTPHeaders({
     "Accept-Language": "en-US,en;q=0.9",
     Accept:
@@ -354,7 +313,7 @@ const scrapePageByPage = async (
 
         currentUrl = nextPageUrl;
         currentPage++;
-        break; // Move to next page
+        break;
       } catch (error) {
         logProgress(
           "PAGE_SCRAPING",
@@ -385,20 +344,12 @@ const scrapeAmazonProducts = async () => {
     process.exit(1);
   }
 
-  let proxies = [];
-  try {
-    proxies = await fetchProxies();
-    logProgress("PROXY", `Fetched ${proxies.length} proxies`);
-  } catch (error) {
-    logProgress("PROXY", `Failed to fetch proxies: ${error.message}`);
-    proxies = []; // Fallback to direct connection
-  }
-
   try {
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
 
-    browser = await launchBrowser(proxies);
+    const context = await launchBrowser();
+    browser = context.browser(); // Store browser reference for cleanup
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing URL: ${baseUrl}`);
@@ -432,7 +383,7 @@ const scrapeAmazonProducts = async () => {
         }
       }
 
-      const page = await browser.newPage();
+      const page = await context.newPage();
       await scrapePageByPage(
         page,
         baseUrl,
