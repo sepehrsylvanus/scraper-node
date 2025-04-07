@@ -3,6 +3,7 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
+const https = require("https");
 
 puppeteer.use(StealthPlugin());
 
@@ -39,11 +40,29 @@ const getRandomUserAgent = () => {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Proxy configuration (add your proxy here)
-const proxyList = [
-  // Example: "http://username:password@proxy-host:port",
-  // Add multiple proxies to rotate
-];
+// Fetch proxies from ProxyScrape API
+const fetchProxies = () => {
+  return new Promise((resolve, reject) => {
+    const url =
+      "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all";
+    https
+      .get(url, (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          const proxyList = data
+            .split("\n")
+            .filter((line) => line.trim() !== "")
+            .map((proxy) => `http://${proxy.trim()}`);
+          resolve(proxyList.slice(0, 5)); // Limit to 5 proxies for this example
+        });
+      })
+      .on("error", (err) => reject(err));
+  });
+};
+
+// Proxy configuration
+let proxyList = [];
 const getRandomProxy = () => {
   return proxyList.length > 0
     ? proxyList[Math.floor(Math.random() * proxyList.length)]
@@ -104,7 +123,10 @@ const launchBrowser = async (retries = 3) => {
       });
       await page.close();
 
-      logProgress("BROWSER", "Browser launched successfully");
+      logProgress(
+        "BROWSER",
+        `Browser launched successfully with proxy: ${proxy || "none"}`
+      );
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
@@ -607,8 +629,20 @@ const scrapePageByPage = async (
   }
 };
 
-// Main scraping function
+// Main scraping function with proxy fetching
 const scrapeAmazonProducts = async () => {
+  // Fetch proxies at the start
+  try {
+    proxyList = await fetchProxies();
+    logProgress(
+      "PROXY",
+      `Fetched ${proxyList.length} proxies: ${proxyList.join(", ")}`
+    );
+  } catch (error) {
+    logProgress("PROXY", `Failed to fetch proxies: ${error.message}`);
+    proxyList = ["http://192.168.1.1:8080"]; // Fallback proxy (fictional)
+  }
+
   const urls = process.argv.slice(2);
   if (!urls.length) {
     console.error("Usage: node scraper.js <url>");
