@@ -44,7 +44,7 @@ const launchBrowser = async (retries = 3) => {
     try {
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: "new", // Use new headless mode
+        headless: false, // Use new headless mode
         protocolTimeout: 180000,
         args: [
           "--no-sandbox",
