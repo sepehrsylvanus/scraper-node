@@ -29,12 +29,16 @@ const logProgress = (level, message) => {
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
-      if (browser && browser.isConnected()) return browser;
+      if (browser && browser.isConnected()) await browser.close(); // Ensure old browser is closed
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
         headless: false,
         protocolTimeout: 86400000,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+        ], // Add memory optimization
       });
       return browser;
     } catch (error) {
@@ -52,7 +56,7 @@ const extractProductUrls = async (page, baseUrl) => {
   let retryCount = 0;
   const maxRetries = 5;
 
-  await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
+  await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
 
   const totalProducts = await page.evaluate(() => {
     const resultsElement = document.querySelector(".results-hits span");
@@ -197,18 +201,10 @@ const extractProductUrls = async (page, baseUrl) => {
     await delay(1000);
   }
 
-  if (allProductUrls.size >= minProductsToCollect) {
-    logProgress(
-      "URL_COLLECTION",
-      `Successfully collected ${allProductUrls.size}/${totalProducts} products`
-    );
-  } else {
-    logProgress(
-      "URL_COLLECTION",
-      `Warning: Only collected ${allProductUrls.size} out of ${totalProducts} expected products`
-    );
-  }
-
+  logProgress(
+    "URL_COLLECTION",
+    `Collected ${allProductUrls.size}/${totalProducts} products`
+  );
   return Array.from(allProductUrls);
 };
 
@@ -225,10 +221,7 @@ const scrapeProductDetails = async (
 
   while (attempt < maxRetries) {
     try {
-      await newPage.goto(url, {
-        waitUntil: "networkidle2",
-        timeout: 60000 + attempt * 30000,
-      });
+      await newPage.goto(url, { waitUntil: "networkidle2", timeout: 120000 }); // Increased timeout
 
       const productData = await newPage.evaluate((url) => {
         const productIdMatch = url.match(/P(\d+)/);
@@ -339,20 +332,17 @@ const scrapeProductDetails = async (
           `Navigation timeout detected. Closing page and retrying ${url}...`
         );
         await newPage.close();
-        await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before reopening
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // Increased delay to 2 seconds
         newPage = await browserInstance.newPage();
         await newPage.setViewport({ width: 1366, height: 768 });
         await newPage.setUserAgent(
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         );
       } else if (attempt === maxRetries) {
-        throw error; // If max retries reached and not a navigation timeout, throw the error
+        throw error;
       } else {
         await delay(2000);
-        await newPage.reload({
-          waitUntil: "networkidle2",
-          timeout: 60000 + attempt * 30000,
-        });
+        await newPage.reload({ waitUntil: "networkidle2", timeout: 120000 });
       }
     }
   }
@@ -397,7 +387,8 @@ const scrapeSephoraUrls = async () => {
     if (!fs.existsSync(sephoraDir))
       fs.mkdirSync(sephoraDir, { recursive: true });
 
-    const browser = await launchBrowser();
+    let browser = await launchBrowser();
+    const productsPerBrowserRestart = 50; // Restart browser every 50 products
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing base URL: ${baseUrl}`);
@@ -442,7 +433,7 @@ const scrapeSephoraUrls = async () => {
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
 
-      let productPage = null;
+      let productCount = 0;
 
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
@@ -450,7 +441,21 @@ const scrapeSephoraUrls = async () => {
           continue;
         }
 
-        productPage = await browser.newPage();
+        // Restart browser every 50 products
+        if (
+          productCount > 0 &&
+          productCount % productsPerBrowserRestart === 0
+        ) {
+          logProgress(
+            "MAIN",
+            `Restarting browser after ${productCount} products...`
+          );
+          await browser.close();
+          browser = await launchBrowser();
+          global.gc && global.gc(); // Attempt to force garbage collection if available
+        }
+
+        const productPage = await browser.newPage();
         await productPage.setViewport({ width: 1366, height: 768 });
         await productPage.setUserAgent(
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -461,7 +466,7 @@ const scrapeSephoraUrls = async () => {
             productPage,
             url,
             browser
-          ); // Pass browser instance
+          );
           productData.url = url;
           productDataArray.push(productData);
           logProgress(
@@ -491,9 +496,19 @@ const scrapeSephoraUrls = async () => {
         await productPage.close();
         logProgress(
           "MAIN",
-          `Closed product page for ${url}. Waiting 1 second before next product...`
+          `Closed product page for ${url}. Waiting 2 seconds before next product...`
         );
-        await new Promise((resolve) => setTimeout(resolve, 1000)); // 1-second delay
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // Increased to 2 seconds
+        productCount++;
+
+        // Debugging: Log memory usage
+        const memoryUsage = process.memoryUsage();
+        logProgress(
+          "DEBUG",
+          `Memory usage: RSS=${(memoryUsage.rss / 1024 / 1024).toFixed(
+            2
+          )}MB, Heap=${(memoryUsage.heapUsed / 1024 / 1024).toFixed(2)}MB`
+        );
       }
 
       logProgress(
@@ -510,5 +525,12 @@ const scrapeSephoraUrls = async () => {
     process.exit(1);
   }
 };
+
+// Enable garbage collection if running with --expose-gc
+if (typeof global.gc === "undefined") {
+  console.log(
+    "Run with --expose-gc to enable manual garbage collection: node --expose-gc sephora.js"
+  );
+}
 
 scrapeSephoraUrls();
