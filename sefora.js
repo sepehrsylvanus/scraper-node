@@ -16,8 +16,9 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
   "0"
 )}-${String(today.getDate()).padStart(2, "0")}`;
 
-// Utility to delay execution
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Utility to delay execution with randomization
+const delay = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 1000));
 
 // Custom logging function
 const logProgress = (level, message) => {
@@ -44,16 +45,15 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs with improved logic to reach total products
+// Extract product URLs with improved logic
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
   let retryCount = 0;
-  const maxRetries = 5; // Increased retries for robustness
+  const maxRetries = 5;
 
   await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-  // Get total products count
   const totalProducts = await page.evaluate(() => {
     const resultsElement = document.querySelector(".results-hits span");
     return resultsElement
@@ -67,17 +67,13 @@ const extractProductUrls = async (page, baseUrl) => {
     return [];
   }
 
-  // Initial scroll and button handling
   try {
     await page.evaluate(async () => {
       const seeMoreButton = document.querySelector(
         "button.see-more-button[data-js-infinitescroll-see-more]"
       );
       if (seeMoreButton) {
-        seeMoreButton.scrollIntoView({
-          behavior: "smooth",
-          block: "center",
-        });
+        seeMoreButton.scrollIntoView({ behavior: "smooth", block: "center" });
         await new Promise((resolve) => setTimeout(resolve, 500));
         seeMoreButton.focus();
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -95,12 +91,11 @@ const extractProductUrls = async (page, baseUrl) => {
 
   let previousProductCount = 0;
   let noNewProductsTime = 0;
-  const maxNoNewProductsTime = 10000; // Increased to 10 seconds
+  const maxNoNewProductsTime = 10000;
   const scrollStep = 500;
   const minProductsToCollect = totalProducts;
 
   while (!shouldStop && allProductUrls.size < minProductsToCollect) {
-    // Get current product URLs
     const currentUrls = await page.evaluate(() => {
       const productElements = document.querySelectorAll(
         ".product-tile.clickable"
@@ -121,7 +116,6 @@ const extractProductUrls = async (page, baseUrl) => {
       `Progress: ${allProductUrls.size}/${totalProducts} unique URLs collected`
     );
 
-    // Check if footer is visible (indicating end of page)
     const footerVisible = await page.evaluate(() => {
       const footer = document.querySelector(
         ".content-asset.footer-reinssurance"
@@ -153,8 +147,6 @@ const extractProductUrls = async (page, baseUrl) => {
             "URL_COLLECTION",
             `Retry ${retryCount}/${maxRetries}: Resetting scroll and waiting for load`
           );
-
-          // Enhanced retry logic: scroll to top and slowly scroll down
           await page.evaluate(async (step) => {
             window.scrollTo({ top: 0, behavior: "smooth" });
             await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -166,8 +158,6 @@ const extractProductUrls = async (page, baseUrl) => {
               await new Promise((resolve) => setTimeout(resolve, 300));
             }
           }, scrollStep);
-
-          // Wait longer after reset to ensure content loads
           await delay(5000);
           noNewProductsTime = 0;
         } else if (allProductUrls.size < minProductsToCollect) {
@@ -199,14 +189,11 @@ const extractProductUrls = async (page, baseUrl) => {
       await page.evaluate(() =>
         window.scrollTo({ top: 0, behavior: "smooth" })
       );
-      await delay(5000); // Wait for potential reload
+      await delay(5000);
       continue;
     }
 
-    // Scroll down
-    await page.evaluate((step) => {
-      window.scrollBy(0, step);
-    }, scrollStep);
+    await page.evaluate((step) => window.scrollBy(0, step), scrollStep);
     await delay(1000);
   }
 
@@ -225,70 +212,98 @@ const extractProductUrls = async (page, baseUrl) => {
   return Array.from(allProductUrls);
 };
 
-// Scrape product details from individual product page (unchanged)
-const scrapeProductDetails = async (page, url) => {
+// Scrape product details with retry logic
+const scrapeProductDetails = async (page, url, retries = 3) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+  let attempt = 0;
 
-  const productData = await page.evaluate((url) => {
-    const productIdMatch = url.match(/P(\d+)/);
-    const productId = productIdMatch ? productIdMatch[1] : "";
+  while (attempt < retries) {
+    try {
+      await page.goto(url, {
+        waitUntil: "networkidle2",
+        timeout: 60000 + attempt * 30000,
+      }); // Increase timeout with each retry
 
-    const priceElement = document.querySelector(
-      ".price-sales.price-sales-standard"
-    );
-    const priceText = priceElement ? priceElement.textContent.trim() : "";
-    const priceMatch = priceText.match(/([\d.,]+)/);
-    const price = priceMatch
-      ? parseFloat(priceMatch[1].replace(".", "").replace(",", "."))
-      : null;
+      const productData = await page.evaluate((url) => {
+        const productIdMatch = url.match(/P(\d+)/);
+        const productId = productIdMatch ? productIdMatch[1] : "";
 
-    const ratingElement = document.querySelector(".bv-overall-score");
-    const rating = ratingElement
-      ? ratingElement.textContent.trim().split("/")[0]
-      : null;
+        const priceElement = document.querySelector(
+          ".price-sales.price-sales-standard"
+        );
+        const priceText = priceElement ? priceElement.textContent.trim() : "";
+        const priceMatch = priceText.match(/([\d.,]+)/);
+        const price = priceMatch
+          ? parseFloat(priceMatch[1].replace(".", "").replace(",", "."))
+          : null;
 
-    const specificationsElement = document.querySelector(".specification");
-    const specifications = specificationsElement
-      ? Array.from(specificationsElement.querySelectorAll("li")).map(
-          (spec) => ({
-            name: spec.querySelector(".name").textContent.trim(),
-            value: spec.querySelector(".value").textContent.trim(),
-          })
-        )
-      : [];
+        const ratingElement = document.querySelector(".bv-overall-score");
+        const rating = ratingElement
+          ? ratingElement.textContent.trim().split("/")[0]
+          : null;
 
-    const breadcrumbElement = document.querySelector(
-      ".breadcrumb.pdp-breadcrumb"
-    );
-    const breadcrumbItems = breadcrumbElement
-      ? Array.from(breadcrumbElement.querySelectorAll(".breadcrumb-element"))
-      : [];
-    const categories = breadcrumbItems
-      .slice(0, -1)
-      .map((item) => item.querySelector("a").textContent.trim())
-      .join(" > ");
+        const specificationsElement = document.querySelector(".specification");
+        const specifications = specificationsElement
+          ? Array.from(specificationsElement.querySelectorAll("li")).map(
+              (spec) => ({
+                name: spec.querySelector(".name").textContent.trim(),
+                value: spec.querySelector(".value").textContent.trim(),
+              })
+            )
+          : [];
 
-    const titleElement = document.querySelector(".product-name");
-    const title = titleElement ? titleElement.textContent.trim() : "";
+        const breadcrumbElement = document.querySelector(
+          ".breadcrumb.pdp-breadcrumb"
+        );
+        const breadcrumbItems = breadcrumbElement
+          ? Array.from(
+              breadcrumbElement.querySelectorAll(".breadcrumb-element")
+            )
+          : [];
+        const categories = breadcrumbItems
+          .slice(0, -1)
+          .map((item) => item.querySelector("a").textContent.trim())
+          .join(" > ");
 
-    const brandElement = document.querySelector(".brand-name");
-    const brand = brandElement ? brandElement.textContent.trim() : "";
+        const titleElement = document.querySelector(".product-name");
+        const title = titleElement ? titleElement.textContent.trim() : "";
 
-    const descriptionElement = document.querySelector(
-      ".description-content.product-description-box"
-    );
-    const description = descriptionElement ? descriptionElement.innerHTML : "";
+        const brandElement = document.querySelector(".brand-name");
+        const brand = brandElement ? brandElement.textContent.trim() : "";
 
-    const readMoreLink = document.querySelector(".read-more-pdp-description");
-    if (readMoreLink) {
-      readMoreLink.click();
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          const expandedDescription = document.querySelector(
-            ".description-ellipsis-wrapper"
-          );
-          resolve({
+        const descriptionElement = document.querySelector(
+          ".description-content.product-description-box"
+        );
+        const description = descriptionElement
+          ? descriptionElement.innerHTML
+          : "";
+
+        const readMoreLink = document.querySelector(
+          ".read-more-pdp-description"
+        );
+        if (readMoreLink) {
+          readMoreLink.click();
+          return new Promise((resolve) => {
+            setTimeout(() => {
+              const expandedDescription = document.querySelector(
+                ".description-ellipsis-wrapper"
+              );
+              resolve({
+                productId,
+                brand,
+                title,
+                price,
+                rating,
+                specifications,
+                categories,
+                description: expandedDescription
+                  ? expandedDescription.innerHTML
+                  : "",
+              });
+            }, 1000);
+          });
+        } else {
+          return {
             productId,
             brand,
             title,
@@ -296,27 +311,28 @@ const scrapeProductDetails = async (page, url) => {
             rating,
             specifications,
             categories,
-            description: expandedDescription
-              ? expandedDescription.innerHTML
-              : "",
-          });
-        }, 1000);
-      });
-    } else {
-      return {
-        productId,
-        brand,
-        title,
-        price,
-        rating,
-        specifications,
-        categories,
-        description,
-      };
-    }
-  }, url);
+            description,
+          };
+        }
+      }, url);
 
-  return productData;
+      return productData;
+    } catch (error) {
+      attempt++;
+      logProgress(
+        "PRODUCT_SCRAPING",
+        `Attempt ${attempt}/${retries} failed for ${url}: ${error.message}`
+      );
+      if (attempt === retries) {
+        throw error; // After max retries, throw the error to be handled by the caller
+      }
+      await delay(2000); // Wait before retrying
+      await page.reload({
+        waitUntil: "networkidle2",
+        timeout: 60000 + attempt * 30000,
+      }); // Attempt reload
+    }
+  }
 };
 
 // Save data to file
@@ -417,7 +433,7 @@ const scrapeSephoraUrls = async () => {
 
         try {
           const productData = await scrapeProductDetails(productPage, url);
-          productData.url = url; // Ensure URL is included in the data
+          productData.url = url;
           productDataArray.push(productData);
           logProgress(
             "MAIN",
@@ -425,7 +441,7 @@ const scrapeSephoraUrls = async () => {
           );
           saveUrlsToFile(productDataArray, outputFileName);
         } catch (error) {
-          console.error(`Failed to scrape ${url}:`, error);
+          console.error(`Failed to scrape ${url} after retries:`, error);
           productDataArray.push({
             url,
             productId: "",
@@ -438,10 +454,11 @@ const scrapeSephoraUrls = async () => {
             specifications: [],
             categories: "",
             description: "",
+            error: error.message, // Log the error for debugging
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(1000);
+        await delay(1000); // Randomized delay between requests
       }
 
       await productPage.close();
