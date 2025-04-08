@@ -222,7 +222,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
       await page.goto(url, {
         waitUntil: "networkidle2",
         timeout: 60000 + attempt * 30000,
-      }); // Increase timeout with each retry
+      });
 
       const productData = await page.evaluate((url) => {
         const productIdMatch = url.match(/P(\d+)/);
@@ -324,13 +324,13 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
         `Attempt ${attempt}/${retries} failed for ${url}: ${error.message}`
       );
       if (attempt === retries) {
-        throw error; // After max retries, throw the error to be handled by the caller
+        throw error;
       }
-      await delay(2000); // Wait before retrying
+      await delay(2000);
       await page.reload({
         waitUntil: "networkidle2",
         timeout: 60000 + attempt * 30000,
-      }); // Attempt reload
+      });
     }
   }
 };
@@ -419,17 +419,20 @@ const scrapeSephoraUrls = async () => {
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
 
-      const productPage = await browser.newPage();
-      await productPage.setViewport({ width: 1366, height: 768 });
-      await productPage.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-      );
+      let productPage = null; // Initialize outside the loop to manage it properly
 
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
           logProgress("MAIN", `Skipping already processed URL: ${url}`);
           continue;
         }
+
+        // Open a new page for each product
+        productPage = await browser.newPage();
+        await productPage.setViewport({ width: 1366, height: 768 });
+        await productPage.setUserAgent(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        );
 
         try {
           const productData = await scrapeProductDetails(productPage, url);
@@ -454,14 +457,20 @@ const scrapeSephoraUrls = async () => {
             specifications: [],
             categories: "",
             description: "",
-            error: error.message, // Log the error for debugging
+            error: error.message,
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
-        await delay(1000); // Randomized delay between requests
+
+        // Close the product page and wait 1 second before opening the next one
+        await productPage.close();
+        logProgress(
+          "MAIN",
+          `Closed product page for ${url}. Waiting 1 second before next product...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // 1-second delay
       }
 
-      await productPage.close();
       logProgress(
         "MAIN",
         `Completed ${baseUrl}: ${productDataArray.length} entries saved to ${outputFileName}`
