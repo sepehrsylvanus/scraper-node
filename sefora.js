@@ -212,19 +212,25 @@ const extractProductUrls = async (page, baseUrl) => {
   return Array.from(allProductUrls);
 };
 
-// Scrape product details with retry logic
-const scrapeProductDetails = async (page, url, retries = 3) => {
+// Scrape product details with retry logic and navigation timeout handling
+const scrapeProductDetails = async (
+  page,
+  url,
+  browserInstance,
+  maxRetries = 5
+) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   let attempt = 0;
+  let newPage = page;
 
-  while (attempt < retries) {
+  while (attempt < maxRetries) {
     try {
-      await page.goto(url, {
+      await newPage.goto(url, {
         waitUntil: "networkidle2",
         timeout: 60000 + attempt * 30000,
       });
 
-      const productData = await page.evaluate((url) => {
+      const productData = await newPage.evaluate((url) => {
         const productIdMatch = url.match(/P(\d+)/);
         const productId = productIdMatch ? productIdMatch[1] : "";
 
@@ -321,16 +327,33 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
       attempt++;
       logProgress(
         "PRODUCT_SCRAPING",
-        `Attempt ${attempt}/${retries} failed for ${url}: ${error.message}`
+        `Attempt ${attempt}/${maxRetries} failed for ${url}: ${error.message}`
       );
-      if (attempt === retries) {
-        throw error;
+
+      if (
+        error.name === "TimeoutError" &&
+        error.message.includes("Navigation timeout")
+      ) {
+        logProgress(
+          "PRODUCT_SCRAPING",
+          `Navigation timeout detected. Closing page and retrying ${url}...`
+        );
+        await newPage.close();
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before reopening
+        newPage = await browserInstance.newPage();
+        await newPage.setViewport({ width: 1366, height: 768 });
+        await newPage.setUserAgent(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        );
+      } else if (attempt === maxRetries) {
+        throw error; // If max retries reached and not a navigation timeout, throw the error
+      } else {
+        await delay(2000);
+        await newPage.reload({
+          waitUntil: "networkidle2",
+          timeout: 60000 + attempt * 30000,
+        });
       }
-      await delay(2000);
-      await page.reload({
-        waitUntil: "networkidle2",
-        timeout: 60000 + attempt * 30000,
-      });
     }
   }
 };
@@ -419,7 +442,7 @@ const scrapeSephoraUrls = async () => {
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
 
-      let productPage = null; // Initialize outside the loop to manage it properly
+      let productPage = null;
 
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
@@ -427,7 +450,6 @@ const scrapeSephoraUrls = async () => {
           continue;
         }
 
-        // Open a new page for each product
         productPage = await browser.newPage();
         await productPage.setViewport({ width: 1366, height: 768 });
         await productPage.setUserAgent(
@@ -435,7 +457,11 @@ const scrapeSephoraUrls = async () => {
         );
 
         try {
-          const productData = await scrapeProductDetails(productPage, url);
+          const productData = await scrapeProductDetails(
+            productPage,
+            url,
+            browser
+          ); // Pass browser instance
           productData.url = url;
           productDataArray.push(productData);
           logProgress(
@@ -462,7 +488,6 @@ const scrapeSephoraUrls = async () => {
           saveUrlsToFile(productDataArray, outputFileName);
         }
 
-        // Close the product page and wait 1 second before opening the next one
         await productPage.close();
         logProgress(
           "MAIN",
