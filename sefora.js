@@ -25,6 +25,28 @@ const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
+// Log memory usage
+const logMemoryUsage = () => {
+  const memoryUsage = process.memoryUsage();
+  logProgress(
+    "DEBUG",
+    `Memory usage: RSS=${(memoryUsage.rss / 1024 / 1024).toFixed(2)}MB, Heap=${(
+      memoryUsage.heapUsed /
+      1024 /
+      1024
+    ).toFixed(2)}MB`
+  );
+};
+
+// Trigger garbage collection if available
+const triggerGC = () => {
+  if (global.gc) {
+    logProgress("GC", "Triggering garbage collection...");
+    global.gc();
+    logMemoryUsage();
+  }
+};
+
 // Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
@@ -32,17 +54,20 @@ const launchBrowser = async (retries = 3) => {
       if (browser && browser.isConnected()) {
         logProgress("BROWSER", "Closing existing browser instance...");
         await browser.close();
+        logProgress("BROWSER", "Existing browser instance closed");
+        triggerGC();
+        await delay(2000);
       }
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: true, // Changed to headless to reduce resource usage; set to false for debugging
+        headless: true,
         protocolTimeout: 86400000,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--disable-gpu", // Added to reduce GPU memory usage
-          "--single-process", // Reduces memory footprint (optional, test compatibility)
+          "--disable-gpu",
+          "--no-zygote",
         ],
       });
       logProgress("BROWSER", "Browser launched successfully");
@@ -332,12 +357,13 @@ const scrapeProductDetails = async (
           `Navigation timeout detected. Closing page and retrying ${url}...`
         );
         await newPage.close();
+        triggerGC();
         newPage = await browserInstance.newPage();
         await newPage.setViewport({ width: 1366, height: 768 });
         await newPage.setUserAgent(
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         );
-        await delay(2000);
+        await delay(3000);
       } else if (attempt === maxRetries) {
         throw error;
       } else {
@@ -378,7 +404,7 @@ const loadExistingUrls = (baseUrl, dir) => {
 const scrapeSephoraUrls = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
-    console.error("Usage: node sephora.js <url1> <url2> ...");
+    console.error("Usage: node --expose-gc sephora.js <url1> <url2> ...");
     process.exit(1);
   }
 
@@ -388,7 +414,7 @@ const scrapeSephoraUrls = async () => {
       fs.mkdirSync(sephoraDir, { recursive: true });
 
     browser = await launchBrowser();
-    const productsPerBrowserRestart = 50; // Restart browser every 50 products
+    const productsPerBrowserRestart = 100; // Reduced to 100 for more frequent restarts
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing base URL: ${baseUrl}`);
@@ -430,6 +456,8 @@ const scrapeSephoraUrls = async () => {
 
       const productUrls = await extractProductUrls(page, baseUrl);
       await page.close();
+      triggerGC();
+      logProgress("MAIN", "Closed initial page after URL extraction");
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
 
@@ -441,7 +469,6 @@ const scrapeSephoraUrls = async () => {
           continue;
         }
 
-        // Restart browser every 50 products
         if (
           productCount > 0 &&
           productCount % productsPerBrowserRestart === 0
@@ -450,11 +477,14 @@ const scrapeSephoraUrls = async () => {
             "MAIN",
             `Restarting browser after ${productCount} products...`
           );
-          await browser.close();
-          logProgress("MAIN", "Old browser instance closed");
+          if (browser && browser.isConnected()) {
+            await browser.close();
+            logProgress("MAIN", "Old browser instance closed");
+            triggerGC();
+          }
+          await delay(3000);
           browser = await launchBrowser();
           logProgress("MAIN", "New browser instance launched");
-          global.gc && global.gc(); // Force garbage collection if enabled
         }
 
         const productPage = await browser.newPage();
@@ -496,21 +526,14 @@ const scrapeSephoraUrls = async () => {
         }
 
         await productPage.close();
+        triggerGC();
         logProgress(
           "MAIN",
-          `Closed product page for ${url}. Waiting 2 seconds before next product...`
+          `Closed product page for ${url}. Waiting 4 seconds before next product...`
         );
-        await delay(2000); // Increased delay to prevent overloading
+        await delay(4000); // Increased to 4 seconds
         productCount++;
-
-        // Log memory usage for debugging
-        const memoryUsage = process.memoryUsage();
-        logProgress(
-          "DEBUG",
-          `Memory usage: RSS=${(memoryUsage.rss / 1024 / 1024).toFixed(
-            2
-          )}MB, Heap=${(memoryUsage.heapUsed / 1024 / 1024).toFixed(2)}MB`
-        );
+        logMemoryUsage();
       }
 
       logProgress(
@@ -522,18 +545,19 @@ const scrapeSephoraUrls = async () => {
     console.error("[FATAL] Fatal error:", error);
   } finally {
     if (browser && browser.isConnected()) {
-      logProgress("MAIN", "Closing browser...");
+      logProgress("MAIN", "Closing browser in finally block...");
       await browser.close();
+      triggerGC();
       logProgress("MAIN", "Browser closed");
     }
     process.exit(0);
   }
 };
 
-// Enable garbage collection if running with --expose-gc
+// Enable garbage collection check
 if (typeof global.gc === "undefined") {
   console.log(
-    "Run with --expose-gc to enable manual garbage collection: node --expose-gc sephora.js"
+    "Run with --expose-gc to enable manual garbage collection: node --expose-gc sephora.js <url>"
   );
 }
 
