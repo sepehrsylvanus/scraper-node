@@ -194,7 +194,7 @@ const extractProductUrls = async (page, baseUrl) => {
   return Array.from(allProductUrls);
 };
 
-// Scrape product details
+// Scrape product details including image URLs and categories
 const scrapeProductDetails = async (
   page,
   url,
@@ -249,6 +249,31 @@ const scrapeProductDetails = async (
           ? productIdElement.textContent.trim()
           : "";
 
+        // Image URLs (semicolon-separated string)
+        const imageUrls = [];
+        const badgeImage = document.querySelector(
+          ".product-detail-badge-image img"
+        );
+        if (badgeImage) imageUrls.push(badgeImage.src);
+        const slideElements = document.querySelectorAll(".swiper-slide");
+        slideElements.forEach((slide) => {
+          const imageSrc = slide.getAttribute("data-image_src");
+          if (imageSrc && !imageUrls.includes(imageSrc))
+            imageUrls.push(imageSrc);
+        });
+        const images = imageUrls.join(";");
+
+        // Categories from breadcrumb (excluding Anasayfa and last item with product name)
+        const breadcrumbItems = document.querySelectorAll(
+          ".breadcrumb li span[itemprop='name']"
+        );
+        const categoriesArray = Array.from(breadcrumbItems)
+          .map((item) => item.textContent.trim())
+          .filter(
+            (cat, index, arr) => cat !== "Anasayfa" && index !== arr.length - 1
+          ); // Skip home and last item
+        const categories = categoriesArray.join(">");
+
         return {
           brand,
           title,
@@ -256,6 +281,8 @@ const scrapeProductDetails = async (
           currency: currencySymbol,
           description,
           productId,
+          images,
+          categories,
         };
       }, url);
 
