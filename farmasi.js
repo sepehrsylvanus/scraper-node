@@ -26,11 +26,17 @@ const logProgress = (level, message) => {
   console.log(`[${new Date().toISOString()}] [${level}] ${message}`);
 };
 
-// Memory management function
+// Enhanced memory management function with heap usage logging
 const cleanupMemory = () => {
   if (global.gc) {
     global.gc();
-    logProgress("MEMORY", "Garbage collection triggered");
+    const memoryUsage = process.memoryUsage();
+    logProgress(
+      "MEMORY",
+      `Garbage collection triggered. Heap used: ${Math.round(
+        memoryUsage.heapUsed / 1024 / 1024
+      )} MB, Heap total: ${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`
+    );
   } else {
     logProgress(
       "MEMORY",
@@ -65,11 +71,12 @@ const launchBrowser = async (retries = 3) => {
           "--disable-dev-shm-usage",
           "--no-first-run",
           "--disable-gpu",
-          "--expose-gc",
+          "--expose-gc", // Ensure garbage collection is exposed
         ],
         defaultViewport: { width: 1280, height: 800 },
       });
       logProgress("BROWSER", "Browser launched successfully");
+      cleanupMemory(); // Clean up after launch
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
@@ -99,7 +106,6 @@ const scrollUntilNoMoreContent = async (page, maxScrolls = 50) => {
   let scrollCount = 0;
 
   while (scrollCount < maxScrolls) {
-    // Check for loading layer (Farmasi uses a loader with class "loading", adjust if needed)
     const isLoading = await page.evaluate(() => {
       const loadingLayer = document.querySelector(".loading");
       return loadingLayer && loadingLayer.style.display !== "none";
@@ -136,12 +142,19 @@ const scrollUntilNoMoreContent = async (page, maxScrolls = 50) => {
       "SCROLLING",
       `Scroll ${scrollCount}: New height ${currentHeight}`
     );
-    await delay(2000); // Wait for content to load
+    await delay(2000);
+    cleanupMemory(); // Clean up after each scroll
   }
 
   if (scrollCount >= maxScrolls) {
     logProgress("SCROLLING", "Max scrolls reached, stopping");
   }
+};
+
+// Extract product ID from URL
+const getProductIdFromUrl = (url) => {
+  const urlParams = new URLSearchParams(url.split("?")[1]);
+  return urlParams.get("pid") || "ID not found";
 };
 
 // Scrape product details from individual product page
@@ -178,7 +191,6 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
       await simulateHumanBehavior(page);
 
       const productData = await page.evaluate(() => {
-        // Extract title
         const titleElement = document.querySelector(
           ".LongName.ProductNameDesktop"
         );
@@ -186,7 +198,6 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           ? titleElement.textContent.trim()
           : "Title not found";
 
-        // Extract price and currency
         const priceContainer = document.querySelector(".ProductActualPrice");
         let price = null;
         let currency = "";
@@ -195,27 +206,39 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
           price = priceElement
             ? parseFloat(priceElement.textContent.trim())
             : null;
-
           const priceText = priceContainer.textContent.trim();
           currency = priceText
             .replace(priceElement ? priceElement.textContent : "", "")
             .trim();
         }
 
-        // Images and rating not requested, leaving as placeholders
-        const images = null;
+        const imageElement = document.querySelector(
+          ".appendProductImages img.zoomImage-1.controlZoom.lazyImage"
+        );
+        const images = imageElement
+          ? imageElement.getAttribute("src") ||
+            imageElement.getAttribute("data-src")
+          : "Image not found";
+
         const rating = null;
-        const description = null;
+
+        const descriptionElement = document.querySelector(
+          "#ProductDescription.Description"
+        );
+        const description = descriptionElement
+          ? descriptionElement.innerHTML.trim()
+          : "Description not found";
 
         return { title, price, currency, images, rating, description };
       });
 
-      cleanupMemory();
+      cleanupMemory(); // Clean up after scraping each product
       return {
         url,
+        productId: getProductIdFromUrl(url),
         title: productData.title,
         price: productData.price,
-        currency: productData.currency || "TL", // Fallback to "TL" if not found
+        currency: productData.currency || "TL",
         images: productData.images,
         rating: productData.rating,
         description: productData.description,
@@ -228,12 +251,13 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
       if (attempt === retries - 1) {
         return {
           url,
+          productId: getProductIdFromUrl(url),
           title: "Failed to scrape",
           price: null,
           currency: "TL",
-          images: null,
+          images: "Image not found",
           rating: null,
-          description: null,
+          description: "Failed to scrape",
         };
       }
       await delay(5000);
@@ -245,6 +269,7 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
 const saveUrlsToFile = (data, filePath) => {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
   logProgress("FILE", `Saved ${data.length} product entries to ${filePath}`);
+  cleanupMemory(); // Clean up after saving
 };
 
 // Load existing URLs
@@ -293,7 +318,6 @@ const scrapeInfiniteScrollPage = async (
         timeout: 90000,
       });
 
-      // Handle cookie consent popup
       try {
         await page.waitForSelector(".cc-nb-okagree", { timeout: 5000 });
         await page.click(".cc-nb-okagree");
@@ -306,11 +330,9 @@ const scrapeInfiniteScrollPage = async (
         );
       }
 
-      // Wait for initial product items
       await page.waitForSelector(".col-lg-3.col-xs-6", { timeout: 30000 });
       await simulateHumanBehavior(page);
 
-      // Handle infinite scroll
       await scrollUntilNoMoreContent(page);
 
       const productUrls = await page.evaluate(() => {
@@ -360,20 +382,21 @@ const scrapeInfiniteScrollPage = async (
           );
           productDataArray.push({
             url,
+            productId: getProductIdFromUrl(url),
             title: "Failed to scrape",
             price: null,
             currency: "TL",
-            images: null,
+            images: "Image not found",
             rating: null,
-            description: null,
+            description: "Failed to scrape",
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
         await delay(Math.random() * 4000 + 3000);
-        cleanupMemory();
       }
 
       await productPage.close();
+      cleanupMemory(); // Clean up after processing all products
       break;
     } catch (error) {
       logProgress(
@@ -450,20 +473,22 @@ const scrapeFarmasiProducts = async () => {
         );
       } finally {
         await page.close();
+        cleanupMemory(); // Clean up after page processing
       }
 
       logProgress(
         "MAIN",
         `Completed ${baseUrl}: ${productDataArray.length} entries saved to ${outputFileName}`
       );
-      cleanupMemory();
     }
   } catch (error) {
     console.error("[FATAL] Fatal error:", error);
   } finally {
-    if (browser) await browser.close();
-    logProgress("MAIN", "Browser closed");
-    cleanupMemory();
+    if (browser) {
+      await browser.close();
+      logProgress("MAIN", "Browser closed");
+      cleanupMemory(); // Final cleanup
+    }
     process.exit(0);
   }
 };
