@@ -1,16 +1,12 @@
-const puppeteer = require("puppeteer-extra");
-const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
 
-puppeteer.use(StealthPlugin());
-
 const outputDir = path.join(__dirname, "output");
-if (!fs.existsSync(outputDir)) {
-  fs.mkdirSync(outputDir);
-}
+if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
 let browser;
+let shouldStop = false;
 
 const today = new Date();
 const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
@@ -18,56 +14,58 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
   "0"
 )}-${String(today.getDate()).padStart(2, "0")}`;
 
-// Utility to delay execution
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Utility to delay execution with randomization
+const delay = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 1000));
 
 // Custom logging function
 const logProgress = (level, message) => {
-  console.log(`[${new Date().toISOString()}] [${level}] ${message}`);
+  process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
-// Memory management function
-const cleanupMemory = () => {
+// Log memory usage
+const logMemoryUsage = () => {
+  const memoryUsage = process.memoryUsage();
+  logProgress(
+    "DEBUG",
+    `Memory usage: RSS=${(memoryUsage.rss / 1024 / 1024).toFixed(2)}MB, Heap=${(
+      memoryUsage.heapUsed /
+      1024 /
+      1024
+    ).toFixed(2)}MB`
+  );
+};
+
+// Trigger garbage collection if available
+const triggerGC = () => {
   if (global.gc) {
+    logProgress("GC", "Triggering garbage collection...");
     global.gc();
-    logProgress("MEMORY", "Garbage collection triggered");
-  } else {
-    logProgress(
-      "MEMORY",
-      "Garbage collection not available - run with --expose-gc"
-    );
+    logMemoryUsage();
   }
 };
 
-// Large pool of realistic user agents
-const getRandomUserAgent = () => {
-  const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/114.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
-  ];
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
-};
-
-// Launch browser with stealth enhancements
+// Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
+      if (browser && browser.process() != null) {
+        logProgress("BROWSER", "Closing existing browser instance...");
+        await browser.close();
+        triggerGC();
+        await delay(2000);
+      }
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
         headless: false,
-        protocolTimeout: 180000,
+        protocolTimeout: 86400000,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--no-first-run",
           "--disable-gpu",
-          "--expose-gc",
+          "--no-zygote",
         ],
-        defaultViewport: { width: 1280, height: 800 },
       });
       logProgress("BROWSER", "Browser launched successfully");
       return browser;
@@ -79,151 +77,183 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Simulate human-like behavior
-const simulateHumanBehavior = async (page) => {
+// Extract product URLs with cookie consent and infinite scroll
+const extractProductUrls = async (page, baseUrl) => {
+  logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
+  let allProductUrls = new Set();
+
   try {
-    await page.evaluate(() => {
-      const x = Math.floor(Math.random() * 800) + 200;
-      const y = Math.floor(Math.random() * 600) + 100;
-      window.scrollTo(x, y);
-    });
-    await delay(Math.random() * 1000 + 500);
+    await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 120000 });
   } catch (error) {
-    logProgress("SIMULATION", `Failed to simulate behavior: ${error.message}`);
+    logProgress("URL_COLLECTION", `Failed to load base URL: ${error.message}`);
+    return [];
   }
-};
 
-// Handle infinite scroll with loading layer
-const scrollUntilNoMoreContent = async (page, maxScrolls = 50) => {
-  let previousHeight = 0;
-  let scrollCount = 0;
+  // Handle cookie consent popup
+  const acceptButtonSelector = "#471ec3c7-64ab-4e76-8eb2-3881b0c27953"; // "Kabul Et" button ID
+  try {
+    await page.waitForSelector(acceptButtonSelector, { timeout: 10000 });
+    await page.click(acceptButtonSelector);
+    logProgress("URL_COLLECTION", "Clicked 'Kabul Et' button");
+    await delay(2000); // Wait for popup to disappear
+  } catch (error) {
+    logProgress(
+      "URL_COLLECTION",
+      "No cookie consent popup found or already accepted"
+    );
+  }
 
-  while (scrollCount < maxScrolls) {
-    const currentHeight = await page.evaluate(() => {
-      window.scrollBy(0, 1000);
-      return document.body.scrollHeight;
-    });
+  // Extract total product count from #filter-section
+  const totalProducts = await page.evaluate(() => {
+    const totalElement = document.querySelector(
+      "#filter-section .mr-4.font-500.d-md-block"
+    );
+    return totalElement
+      ? parseInt(totalElement.textContent.replace(/[^\d]/g, ""), 10)
+      : 0;
+  });
+  logProgress("URL_COLLECTION", `Total products expected: ${totalProducts}`);
 
-    if (currentHeight === previousHeight) {
+  // Infinite scroll with loading layer detection
+  while (!shouldStop) {
+    try {
+      await page.evaluate(async () => {
+        let currentPosition = 0;
+        const scrollStep = 500;
+        const maxHeight = document.body.scrollHeight;
+
+        while (currentPosition < maxHeight) {
+          window.scrollBy(0, scrollStep);
+          currentPosition += scrollStep;
+          await new Promise((resolve) => setTimeout(resolve, 500)); // Half second delay
+        }
+      });
+
+      // Check for loading layer and wait until it disappears
+      let isLoading = await page.evaluate(() => {
+        const loadingLayer = document.querySelector("[LOADING_LAYER_SELECTOR]"); // Replace with actual selector
+        return loadingLayer && loadingLayer.style.display !== "none";
+      });
+
+      while (isLoading && !shouldStop) {
+        logProgress(
+          "URL_COLLECTION",
+          "Loading layer detected, pausing scroll..."
+        );
+        await delay(1000); // Check every second
+        isLoading = await page.evaluate(() => {
+          const loadingLayer = document.querySelector(
+            "[LOADING_LAYER_SELECTOR]"
+          );
+          return loadingLayer && loadingLayer.style.display !== "none";
+        });
+      }
+      logProgress("URL_COLLECTION", "Loading layer gone, resuming scroll...");
+
+      // Collect current URLs after each scroll
+      const currentUrls = await page.evaluate(() => {
+        const productElements = document.querySelectorAll(
+          ".product--item .thumbnail-container a[data-discover='true']"
+        );
+        return Array.from(productElements)
+          .map((element) => element.href)
+          .filter((url) => url);
+      });
+
+      const previousSize = allProductUrls.size;
+      currentUrls.forEach((url) => allProductUrls.add(url));
       logProgress(
-        "SCROLLING",
-        "No new content loaded, assuming end of infinite scroll"
+        "URL_COLLECTION",
+        `Collected ${allProductUrls.size}/${totalProducts} unique URLs`
       );
+
+      // Break if no new URLs are loaded (end of infinite scroll)
+      if (allProductUrls.size === previousSize) {
+        logProgress("URL_COLLECTION", "No new products loaded, ending scroll");
+        break;
+      }
+
+      // Optional: Break if we’ve collected all expected products
+      if (totalProducts && allProductUrls.size >= totalProducts) {
+        logProgress(
+          "URL_COLLECTION",
+          "Reached expected product count, stopping"
+        );
+        break;
+      }
+    } catch (error) {
+      logProgress("URL_COLLECTION", `Error during scroll: ${error.message}`);
       break;
     }
-
-    previousHeight = currentHeight;
-    scrollCount++;
-    logProgress(
-      "SCROLLING",
-      `Scroll ${scrollCount}: New height ${currentHeight}`
-    );
-    await delay(2000); // Wait for content to load
   }
 
-  if (scrollCount >= maxScrolls) {
-    logProgress("SCROLLING", "Max scrolls reached, stopping");
-  }
+  logProgress(
+    "URL_COLLECTION",
+    `Total unique URLs collected: ${allProductUrls.size}`
+  );
+  return Array.from(allProductUrls);
 };
 
-// Extract product ID from URL
-const getProductIdFromUrl = (url) => {
-  const urlParts = url.split("/");
-  const lastPart = urlParts[urlParts.length - 1];
-  return lastPart.split("?")[0] || "ID not found";
-};
-
-// Scrape product details from individual product page
-const scrapeProductDetails = async (page, url, retries = 3) => {
+// Scrape product details
+const scrapeProductDetails = async (
+  page,
+  url,
+  browserInstance,
+  maxRetries = 3
+) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
-  for (let attempt = 0; attempt < retries; attempt++) {
+  let attempt = 0;
+
+  while (attempt < maxRetries) {
     try {
-      await page.setUserAgent(getRandomUserAgent());
-      await page.setExtraHTTPHeaders({
-        "Accept-Language": "en-US,en;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        Referer: "https://www.eveshop.com.tr/",
-        "Upgrade-Insecure-Requests": "1",
-      });
-      await page.goto(url, { waitUntil: "networkidle0", timeout: 90000 }); // Wait for full load
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
 
-      // Wait for product title (adjust selector)
-      await page.waitForSelector(".product-title", { timeout: 30000 });
-      await simulateHumanBehavior(page);
+      const productData = await page.evaluate((url) => {
+        const titleElement = document.querySelector(".product__title");
+        const title = titleElement ? titleElement.textContent.trim() : "";
 
-      const productData = await page.evaluate(() => {
-        const titleElement = document.querySelector(".product-title");
-        const title = titleElement
-          ? titleElement.textContent.trim()
-          : "Title not found";
-
-        const priceElement = document.querySelector(".product-price");
-        let price = null;
-        let currency = "";
-        if (priceElement) {
-          const priceText = priceElement.textContent.trim();
-          price = parseFloat(
-            priceText.replace(/[^\d,.]/g, "").replace(",", ".")
-          );
-          currency = priceText.replace(/[0-9,.]/g, "").trim() || "TL";
-        }
-
-        const imageElement = document.querySelector(".product-image img");
-        const images = imageElement
-          ? imageElement.getAttribute("src") ||
-            imageElement.getAttribute("data-src")
-          : "Image not found";
-
-        const rating = null;
-
-        const descriptionElement = document.querySelector(
-          ".product-description"
+        const priceElement = document.querySelector(
+          ".product-price__price span"
         );
+        const priceText = priceElement ? priceElement.textContent.trim() : "";
+        const price = priceText
+          ? parseFloat(priceText.replace(/[^\d.,]/g, "").replace(",", "."))
+          : null;
+
+        const descriptionElement = document.querySelector(".desc.mt-15");
         const description = descriptionElement
-          ? descriptionElement.innerHTML.trim()
-          : "Description not found";
+          ? descriptionElement.textContent.trim()
+          : "";
 
-        return { title, price, currency, images, rating, description };
-      });
+        const vendorElement = document.querySelector(".product-vendor");
+        const brand = vendorElement ? vendorElement.textContent.trim() : "";
 
-      cleanupMemory();
-      return {
-        url,
-        productId: getProductIdFromUrl(url),
-        title: productData.title,
-        price: productData.price,
-        currency: productData.currency || "TL",
-        images: productData.images,
-        rating: productData.rating,
-        description: productData.description,
-      };
+        return { title, price, description, brand };
+      }, url);
+
+      if (!productData.title) throw new Error("No product title found");
+
+      return { ...productData, url, currency: "TRY" };
     } catch (error) {
+      attempt++;
       logProgress(
         "PRODUCT_SCRAPING",
-        `Attempt ${attempt + 1} failed: ${error.message}`
+        `Attempt ${attempt}/${maxRetries} failed for ${url}: ${error.message}`
       );
-      if (attempt === retries - 1) {
-        return {
-          url,
-          productId: getProductIdFromUrl(url),
-          title: "Failed to scrape",
-          price: null,
-          currency: "TL",
-          images: "Image not found",
-          rating: null,
-          description: "Failed to scrape",
-        };
-      }
-      await delay(5000);
+      if (attempt === maxRetries) return null;
+      await delay(2000);
     }
   }
 };
 
 // Save data to file
 const saveUrlsToFile = (data, filePath) => {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-  logProgress("FILE", `Saved ${data.length} product entries to ${filePath}`);
+  const filteredData = data.filter((item) => item !== null);
+  fs.writeFileSync(filePath, JSON.stringify(filteredData, null, 2));
+  logProgress(
+    "FILE",
+    `Saved ${filteredData.length} product entries to ${filePath}`
+  );
 };
 
 // Load existing URLs
@@ -236,9 +266,8 @@ const loadExistingUrls = (baseUrl, dir) => {
 
   for (const file of existingFiles) {
     try {
-      const data = fs.readFileSync(path.join(dir, file), "utf8");
-      const entries = JSON.parse(data);
-      entries.forEach((entry) => existingUrls.add(entry.url));
+      const data = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+      data.forEach((entry) => entry?.url && existingUrls.add(entry.url));
     } catch (error) {
       console.error(`Error reading ${file}:`, error.message);
     }
@@ -246,149 +275,24 @@ const loadExistingUrls = (baseUrl, dir) => {
   return existingUrls;
 };
 
-// Scrape products with infinite scroll
-const scrapeInfiniteScrollPage = async (
-  page,
-  baseUrl,
-  processedUrls,
-  productDataArray,
-  outputFileName,
-  retries = 3
-) => {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      await page.setUserAgent(getRandomUserAgent());
-      await page.setExtraHTTPHeaders({
-        "Accept-Language": "en-US,en;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        Referer: "https://www.eveshop.com.tr/",
-        "Upgrade-Insecure-Requests": "1",
-      });
-
-      logProgress("PAGE_SCRAPING", `Navigating to: ${baseUrl}`);
-      await page.goto(baseUrl, { waitUntil: "networkidle0", timeout: 90000 }); // Wait for full load
-
-      // Handle cookie consent popup
-      try {
-        await page.waitForSelector("#471ec3c7-64ab-4e76-8eb2-3881b0c27953", {
-          timeout: 5000,
-        });
-        await page.click("#471ec3c7-64ab-4e76-8eb2-3881b0c27953");
-        logProgress("PAGE_SCRAPING", "Clicked 'Kabul Et' on cookie consent");
-        await delay(1000);
-      } catch (e) {
-        logProgress(
-          "PAGE_SCRAPING",
-          "No cookie popup found or failed to click: " + e.message
-        );
-      }
-
-      // Wait for initial product items (adjust selector)
-      await page.waitForSelector(".product-item", { timeout: 30000 });
-      await simulateHumanBehavior(page);
-
-      // Handle infinite scroll
-      await scrollUntilNoMoreContent(page);
-
-      const productUrls = await page.evaluate(() => {
-        const productCards = document.querySelectorAll(".product-item"); // Adjust selector
-        return Array.from(productCards)
-          .map((card) => {
-            const link = card.querySelector("a"); // Adjust selector
-            return link ? link.getAttribute("href") : null;
-          })
-          .filter((url) => url)
-          .map((url) =>
-            url.startsWith("http") ? url : `https://www.eveshop.com.tr${url}`
-          );
-      });
-
-      logProgress("PAGE_SCRAPING", `Found ${productUrls.length} product URLs`);
-
-      const productPage = await browser.newPage();
-      await productPage.setUserAgent(getRandomUserAgent());
-      await productPage.setExtraHTTPHeaders({
-        "Accept-Language": "en-US,en;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        Referer: baseUrl,
-        "Upgrade-Insecure-Requests": "1",
-      });
-
-      for (const url of productUrls) {
-        if (processedUrls.has(url)) {
-          logProgress(
-            "PAGE_SCRAPING",
-            `Skipping already processed URL: ${url}`
-          );
-          continue;
-        }
-
-        try {
-          const productData = await scrapeProductDetails(productPage, url);
-          productDataArray.push(productData);
-          processedUrls.add(url);
-          logProgress("PAGE_SCRAPING", `Scraped ${url} successfully`);
-          saveUrlsToFile(productDataArray, outputFileName);
-        } catch (error) {
-          logProgress(
-            "PAGE_SCRAPING",
-            `Failed to scrape ${url}: ${error.message}`
-          );
-          productDataArray.push({
-            url,
-            productId: getProductIdFromUrl(url),
-            title: "Failed to scrape",
-            price: null,
-            currency: "TL",
-            images: "Image not found",
-            rating: null,
-            description: "Failed to scrape",
-          });
-          saveUrlsToFile(productDataArray, outputFileName);
-        }
-        await delay(Math.random() * 4000 + 3000);
-        cleanupMemory();
-      }
-
-      await productPage.close();
-      break;
-    } catch (error) {
-      logProgress(
-        "PAGE_SCRAPING",
-        `Attempt ${attempt + 1} failed: ${error.message}`
-      );
-      if (attempt === retries - 1) {
-        logProgress("PAGE_SCRAPING", "Max retries reached. Moving on.");
-        break;
-      }
-      await page.close();
-      page = await browser.newPage();
-      await delay(5000);
-    }
-  }
-};
-
 // Main scraping function
-const scrapeEveShopProducts = async () => {
+const scrapeWebsite = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
-    console.error("Usage: node scraper.js <url>");
+    console.error("Usage: node --expose-gc script.js <url1> <url2> ...");
     process.exit(1);
   }
 
   try {
-    browser = await launchBrowser();
+    const siteDir = path.join(outputDir, "eveshop");
+    if (!fs.existsSync(siteDir)) fs.mkdirSync(siteDir, { recursive: true });
 
-    const eveShopDir = path.join(outputDir, "eveshop");
-    if (!fs.existsSync(eveShopDir)) {
-      fs.mkdirSync(eveShopDir, { recursive: true });
-    }
+    browser = await launchBrowser();
+    const productsPerBrowserRestart = 50;
 
     for (const baseUrl of urls) {
-      logProgress("MAIN", `Processing URL: ${baseUrl}`);
-      let processedUrls = loadExistingUrls(baseUrl, eveShopDir);
+      logProgress("MAIN", `Processing base URL: ${baseUrl}`);
+      let processedUrls = loadExistingUrls(baseUrl, siteDir);
       let productDataArray = [];
 
       const urlSlug = baseUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 50);
@@ -398,53 +302,82 @@ const scrapeEveShopProducts = async () => {
         .replace("T", "_")
         .split("Z")[0];
       const outputFileName = path.join(
-        eveShopDir,
+        siteDir,
         `products_${dateStr}_${urlSlug}_${timestamp}.json`
       );
 
-      if (fs.existsSync(outputFileName)) {
-        try {
-          const existingData = fs.readFileSync(outputFileName, "utf8");
-          productDataArray = JSON.parse(existingData);
+      let page = await browser.newPage();
+      await page.setViewport({ width: 1366, height: 768 });
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+      );
+
+      const productUrls = await extractProductUrls(page, baseUrl);
+      await page.close().catch(() => {});
+      triggerGC();
+
+      logProgress("MAIN", `Found ${productUrls.length} product URLs`);
+      let productCount = 0;
+
+      for (const url of productUrls) {
+        if (processedUrls.has(url)) {
+          logProgress("MAIN", `Skipping already processed URL: ${url}`);
+          continue;
+        }
+
+        if (
+          productCount > 0 &&
+          productCount % productsPerBrowserRestart === 0
+        ) {
           logProgress(
             "MAIN",
-            `Loaded ${productDataArray.length} existing entries from ${outputFileName}`
+            `Restarting browser after ${productCount} products...`
           );
+          await browser.close().catch(() => {});
+          triggerGC();
+          await delay(3000);
+          browser = await launchBrowser();
+        }
+
+        const productPage = await browser.newPage();
+        await productPage.setViewport({ width: 1366, height: 768 });
+        await productPage.setUserAgent(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        );
+
+        try {
+          const productData = await scrapeProductDetails(
+            productPage,
+            url,
+            browser
+          );
+          if (productData) productDataArray.push(productData);
+          saveUrlsToFile(productDataArray, outputFileName);
         } catch (error) {
-          console.error(
-            `Error reading existing file ${outputFileName}:`,
-            error.message
-          );
+          logProgress("MAIN", `Failed to scrape ${url}: ${error.message}`);
+        } finally {
+          await productPage.close().catch(() => {});
+          triggerGC();
+          await delay(4000);
+          productCount++;
         }
       }
-
-      let page = await browser.newPage();
-      try {
-        await scrapeInfiniteScrollPage(
-          page,
-          baseUrl,
-          processedUrls,
-          productDataArray,
-          outputFileName
-        );
-      } finally {
-        await page.close();
-      }
-
-      logProgress(
-        "MAIN",
-        `Completed ${baseUrl}: ${productDataArray.length} entries saved to ${outputFileName}`
-      );
-      cleanupMemory();
     }
   } catch (error) {
     console.error("[FATAL] Fatal error:", error);
   } finally {
-    if (browser) await browser.close();
-    logProgress("MAIN", "Browser closed");
-    cleanupMemory();
+    if (browser && browser.process() != null) {
+      await browser.close().catch(() => {});
+      triggerGC();
+    }
     process.exit(0);
   }
 };
 
-scrapeEveShopProducts();
+if (typeof global.gc === "undefined") {
+  console.log(
+    "Run with --expose-gc to enable manual garbage collection: node --expose-gc script.js <url>"
+  );
+}
+
+scrapeWebsite();
