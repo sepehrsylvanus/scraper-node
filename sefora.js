@@ -51,16 +51,15 @@ const triggerGC = () => {
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
-      if (browser && browser.isConnected()) {
+      if (browser && browser.process() != null) {
         logProgress("BROWSER", "Closing existing browser instance...");
         await browser.close();
-        logProgress("BROWSER", "Existing browser instance closed");
         triggerGC();
         await delay(2000);
       }
       logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
       browser = await puppeteer.launch({
-        headless: true,
+        headless: false,
         protocolTimeout: 86400000,
         args: [
           "--no-sandbox",
@@ -80,14 +79,17 @@ const launchBrowser = async (retries = 3) => {
   }
 };
 
-// Extract product URLs with improved logic
+// Extract product URLs with scroll and button click
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);
   let allProductUrls = new Set();
-  let retryCount = 0;
-  const maxRetries = 5;
 
-  await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 120000 });
+  try {
+    await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 120000 });
+  } catch (error) {
+    logProgress("URL_COLLECTION", `Failed to load base URL: ${error.message}`);
+    return [];
+  }
 
   const totalProducts = await page.evaluate(() => {
     const resultsElement = document.querySelector(".results-hits span");
@@ -102,128 +104,70 @@ const extractProductUrls = async (page, baseUrl) => {
     return [];
   }
 
-  try {
-    await page.evaluate(async () => {
-      const seeMoreButton = document.querySelector(
-        "button.see-more-button[data-js-infinitescroll-see-more]"
-      );
-      if (seeMoreButton) {
-        seeMoreButton.scrollIntoView({ behavior: "smooth", block: "center" });
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        seeMoreButton.click();
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-      }
-    });
-    logProgress("URL_COLLECTION", "Initial scroll and button click completed");
-  } catch (error) {
-    logProgress(
-      "URL_COLLECTION",
-      "Error with initial button handling: " + error.message
-    );
-  }
-
-  let previousProductCount = 0;
-  let noNewProductsTime = 0;
-  const maxNoNewProductsTime = 10000;
-  const scrollStep = 500;
-  const minProductsToCollect = totalProducts;
-
-  while (!shouldStop && allProductUrls.size < minProductsToCollect) {
-    const currentUrls = await page.evaluate(() => {
-      const productElements = document.querySelectorAll(
-        ".product-tile.clickable"
-      );
-      return Array.from(productElements)
-        .map((element) => {
-          const link = element.querySelector(".product-tile-link");
-          return link ? link.href : null;
-        })
-        .filter((url) => url);
-    });
-
-    const previousSize = allProductUrls.size;
-    currentUrls.forEach((url) => allProductUrls.add(url));
-
-    logProgress(
-      "URL_COLLECTION",
-      `Progress: ${allProductUrls.size}/${totalProducts} unique URLs collected`
-    );
-
-    const footerVisible = await page.evaluate(() => {
-      const footer = document.querySelector(
-        ".content-asset.footer-reinssurance"
-      );
-      if (footer) {
-        const rect = footer.getBoundingClientRect();
-        return (
-          rect.top >= 0 &&
-          rect.bottom <=
-            (window.innerHeight || document.documentElement.clientHeight)
-        );
-      }
-      return false;
-    });
-
-    if (allProductUrls.size === previousProductCount) {
-      noNewProductsTime += 1000;
-      if (noNewProductsTime >= maxNoNewProductsTime) {
-        logProgress(
-          "URL_COLLECTION",
-          `No new products for 10 seconds. Current count: ${allProductUrls.size}/${totalProducts}`
-        );
-        if (
-          allProductUrls.size < minProductsToCollect &&
-          retryCount < maxRetries
-        ) {
-          retryCount++;
-          logProgress(
-            "URL_COLLECTION",
-            `Retry ${retryCount}/${maxRetries}: Resetting scroll and waiting for load`
-          );
-          await page.evaluate(async (step) => {
-            window.scrollTo({ top: 0, behavior: "smooth" });
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-            let currentPosition = 0;
-            const maxHeight = document.body.scrollHeight;
-            while (currentPosition < maxHeight) {
-              window.scrollBy(0, step);
-              currentPosition += step;
-              await new Promise((resolve) => setTimeout(resolve, 300));
-            }
-          }, scrollStep);
-          await delay(5000);
-          noNewProductsTime = 0;
-        } else {
-          logProgress(
-            "URL_COLLECTION",
-            `Max retries exhausted or sufficient products collected. Proceeding with ${allProductUrls.size} products`
-          );
-          break;
+  // Scroll and click "See more products" button
+  let hasMoreButton = true;
+  while (hasMoreButton && !shouldStop) {
+    try {
+      // Scroll 500px every half second
+      await page.evaluate(async () => {
+        let currentPosition = 0;
+        const scrollStep = 500;
+        const maxHeight = document.body.scrollHeight;
+        while (currentPosition < maxHeight) {
+          window.scrollBy(0, scrollStep);
+          currentPosition += scrollStep;
+          await new Promise((resolve) => setTimeout(resolve, 500)); // Half second delay
         }
-      }
-    } else {
-      noNewProductsTime = 0;
-      previousProductCount = allProductUrls.size;
-    }
+      });
 
-    if (footerVisible && allProductUrls.size < minProductsToCollect) {
-      retryCount++;
-      if (retryCount >= maxRetries) {
-        logProgress(
-          "URL_COLLECTION",
-          `Max retries reached with footer visible. Proceeding with ${allProductUrls.size} products`
+      // Check for and click the "See more products" button
+      const buttonSelector =
+        "button.see-more-button[data-js-infinitescroll-see-more]";
+      hasMoreButton = await page.evaluate((selector) => {
+        const button = document.querySelector(selector);
+        if (button && button.style.display !== "none" && !button.disabled) {
+          button.scrollIntoView({ behavior: "smooth", block: "center" });
+          button.click();
+          return true;
+        }
+        return false;
+      }, buttonSelector);
+
+      if (hasMoreButton) {
+        logProgress("URL_COLLECTION", "Clicked 'Daha fazla ürün gör' button");
+        await delay(3000); // Wait for more products to load
+      }
+
+      // Collect current URLs
+      const currentUrls = await page.evaluate(() => {
+        const productElements = document.querySelectorAll(
+          ".product-tile.clickable"
         );
+        return Array.from(productElements)
+          .map((element) => {
+            const link = element.querySelector(".product-tile-link");
+            return link ? link.href : null;
+          })
+          .filter((url) => url);
+      });
+
+      currentUrls.forEach((url) => allProductUrls.add(url));
+      logProgress(
+        "URL_COLLECTION",
+        `Progress: ${allProductUrls.size}/${totalProducts} unique URLs collected`
+      );
+
+      // Break if we've collected all expected products
+      if (allProductUrls.size >= totalProducts) {
         break;
       }
-      await page.evaluate(() =>
-        window.scrollTo({ top: 0, behavior: "smooth" })
+    } catch (error) {
+      logProgress(
+        "URL_COLLECTION",
+        `Error during scroll/button click: ${error.message}`
       );
-      await delay(5000);
-      continue;
+      hasMoreButton = false;
     }
-
-    await page.evaluate((step) => window.scrollBy(0, step), scrollStep);
-    await delay(1000);
   }
 
   logProgress(
@@ -233,22 +177,21 @@ const extractProductUrls = async (page, baseUrl) => {
   return Array.from(allProductUrls);
 };
 
-// Scrape product details with retry logic and navigation timeout handling
+// Scrape product details with improved error handling
 const scrapeProductDetails = async (
   page,
   url,
   browserInstance,
-  maxRetries = 5
+  maxRetries = 3
 ) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   let attempt = 0;
-  let newPage = page;
 
   while (attempt < maxRetries) {
     try {
-      await newPage.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
 
-      const productData = await newPage.evaluate((url) => {
+      const productData = await page.evaluate((url) => {
         const productIdMatch = url.match(/P(\d+)/);
         const productId = productIdMatch ? productIdMatch[1] : "";
 
@@ -256,9 +199,13 @@ const scrapeProductDetails = async (
           ".price-sales.price-sales-standard"
         );
         const priceText = priceElement ? priceElement.textContent.trim() : "";
-        const priceMatch = priceText.match(/([\d.,]+)/);
-        const price = priceMatch
-          ? parseFloat(priceMatch[1].replace(".", "").replace(",", "."))
+        const price = priceText.match(/([\d.,]+)/)
+          ? parseFloat(
+              priceText
+                .match(/([\d.,]+)/)[1]
+                .replace(".", "")
+                .replace(",", ".")
+            )
           : null;
 
         const ratingElement = document.querySelector(".bv-overall-score");
@@ -270,77 +217,45 @@ const scrapeProductDetails = async (
         const specifications = specificationsElement
           ? Array.from(specificationsElement.querySelectorAll("li")).map(
               (spec) => ({
-                name: spec.querySelector(".name").textContent.trim(),
-                value: spec.querySelector(".value").textContent.trim(),
+                name: spec.querySelector(".name")?.textContent.trim() || "",
+                value: spec.querySelector(".value")?.textContent.trim() || "",
               })
             )
           : [];
 
-        const breadcrumbElement = document.querySelector(
-          ".breadcrumb.pdp-breadcrumb"
+        const breadcrumbItems = document.querySelectorAll(
+          ".breadcrumb.pdp-breadcrumb .breadcrumb-element"
         );
-        const breadcrumbItems = breadcrumbElement
-          ? Array.from(
-              breadcrumbElement.querySelectorAll(".breadcrumb-element")
-            )
-          : [];
-        const categories = breadcrumbItems
+        const categories = Array.from(breadcrumbItems)
           .slice(0, -1)
-          .map((item) => item.querySelector("a").textContent.trim())
+          .map((item) => item.querySelector("a")?.textContent.trim() || "")
           .join(" > ");
 
-        const titleElement = document.querySelector(".product-name");
-        const title = titleElement ? titleElement.textContent.trim() : "";
+        const title =
+          document.querySelector(".product-name")?.textContent.trim() || "";
+        const brand =
+          document.querySelector(".brand-name")?.textContent.trim() || "";
+        const description =
+          document.querySelector(".description-content.product-description-box")
+            ?.innerHTML || "";
 
-        const brandElement = document.querySelector(".brand-name");
-        const brand = brandElement ? brandElement.textContent.trim() : "";
-
-        const descriptionElement = document.querySelector(
-          ".description-content.product-description-box"
-        );
-        const description = descriptionElement
-          ? descriptionElement.innerHTML
-          : "";
-
-        const readMoreLink = document.querySelector(
-          ".read-more-pdp-description"
-        );
-        if (readMoreLink) {
-          readMoreLink.click();
-          return new Promise((resolve) => {
-            setTimeout(() => {
-              const expandedDescription = document.querySelector(
-                ".description-ellipsis-wrapper"
-              );
-              resolve({
-                productId,
-                brand,
-                title,
-                price,
-                rating,
-                specifications,
-                categories,
-                description: expandedDescription
-                  ? expandedDescription.innerHTML
-                  : description,
-              });
-            }, 1000);
-          });
-        } else {
-          return {
-            productId,
-            brand,
-            title,
-            price,
-            rating,
-            specifications,
-            categories,
-            description,
-          };
-        }
+        return {
+          productId,
+          brand,
+          title,
+          price,
+          rating,
+          specifications,
+          categories,
+          description,
+        };
       }, url);
 
-      return productData;
+      if (!productData.title) {
+        throw new Error("No product title found");
+      }
+
+      return { ...productData, url, currency: "TRY" };
     } catch (error) {
       attempt++;
       logProgress(
@@ -348,36 +263,42 @@ const scrapeProductDetails = async (
         `Attempt ${attempt}/${maxRetries} failed for ${url}: ${error.message}`
       );
 
+      if (attempt === maxRetries) {
+        logProgress(
+          "PRODUCT_SCRAPING",
+          `Skipping product ${url} after max retries`
+        );
+        return null; // Skip this product
+      }
+
       if (
-        error.name === "TimeoutError" &&
-        error.message.includes("Navigation timeout")
+        error.name === "ProtocolError" ||
+        error.message.includes("No target with given id")
       ) {
         logProgress(
           "PRODUCT_SCRAPING",
-          `Navigation timeout detected. Closing page and retrying ${url}...`
+          "Protocol error detected, recreating page"
         );
-        await newPage.close();
-        triggerGC();
-        newPage = await browserInstance.newPage();
-        await newPage.setViewport({ width: 1366, height: 768 });
-        await newPage.setUserAgent(
+        await page.close().catch(() => {});
+        page = await browserInstance.newPage();
+        await page.setViewport({ width: 1366, height: 768 });
+        await page.setUserAgent(
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         );
-        await delay(3000);
-      } else if (attempt === maxRetries) {
-        throw error;
-      } else {
-        await delay(2000);
-        await newPage.reload({ waitUntil: "networkidle2", timeout: 120000 });
       }
+      await delay(2000);
     }
   }
 };
 
 // Save data to file
 const saveUrlsToFile = (data, filePath) => {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-  logProgress("FILE", `Saved ${data.length} product entries to ${filePath}`);
+  const filteredData = data.filter((item) => item !== null);
+  fs.writeFileSync(filePath, JSON.stringify(filteredData, null, 2));
+  logProgress(
+    "FILE",
+    `Saved ${filteredData.length} product entries to ${filePath}`
+  );
 };
 
 // Load existing URLs
@@ -390,9 +311,8 @@ const loadExistingUrls = (baseUrl, dir) => {
 
   for (const file of existingFiles) {
     try {
-      const data = fs.readFileSync(path.join(dir, file), "utf8");
-      const entries = JSON.parse(data);
-      entries.forEach((entry) => existingUrls.add(entry.url));
+      const data = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+      data.forEach((entry) => entry?.url && existingUrls.add(entry.url));
     } catch (error) {
       console.error(`Error reading ${file}:`, error.message);
     }
@@ -414,7 +334,7 @@ const scrapeSephoraUrls = async () => {
       fs.mkdirSync(sephoraDir, { recursive: true });
 
     browser = await launchBrowser();
-    const productsPerBrowserRestart = 100; // Reduced to 100 for more frequent restarts
+    const productsPerBrowserRestart = 50;
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing base URL: ${baseUrl}`);
@@ -432,22 +352,6 @@ const scrapeSephoraUrls = async () => {
         `products_${dateStr}_${urlSlug}_${timestamp}.json`
       );
 
-      if (fs.existsSync(outputFileName)) {
-        try {
-          const existingData = fs.readFileSync(outputFileName, "utf8");
-          productDataArray = JSON.parse(existingData);
-          logProgress(
-            "MAIN",
-            `Loaded ${productDataArray.length} existing entries from ${outputFileName}`
-          );
-        } catch (error) {
-          console.error(
-            `Error reading existing file ${outputFileName}:`,
-            error.message
-          );
-        }
-      }
-
       let page = await browser.newPage();
       await page.setViewport({ width: 1366, height: 768 });
       await page.setUserAgent(
@@ -455,12 +359,10 @@ const scrapeSephoraUrls = async () => {
       );
 
       const productUrls = await extractProductUrls(page, baseUrl);
-      await page.close();
+      await page.close().catch(() => {});
       triggerGC();
-      logProgress("MAIN", "Closed initial page after URL extraction");
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
-
       let productCount = 0;
 
       for (const url of productUrls) {
@@ -477,14 +379,10 @@ const scrapeSephoraUrls = async () => {
             "MAIN",
             `Restarting browser after ${productCount} products...`
           );
-          if (browser && browser.isConnected()) {
-            await browser.close();
-            logProgress("MAIN", "Old browser instance closed");
-            triggerGC();
-          }
+          await browser.close().catch(() => {});
+          triggerGC();
           await delay(3000);
           browser = await launchBrowser();
-          logProgress("MAIN", "New browser instance launched");
         }
 
         const productPage = await browser.newPage();
@@ -499,62 +397,38 @@ const scrapeSephoraUrls = async () => {
             url,
             browser
           );
-          productData.url = url;
-          productDataArray.push(productData);
-          logProgress(
-            "MAIN",
-            `Scraped details for ${url}: Price=${productData.price}, Rating=${productData.rating}`
-          );
+          if (productData) {
+            productDataArray.push(productData);
+            logProgress("MAIN", `Scraped details for ${url}`);
+          }
           saveUrlsToFile(productDataArray, outputFileName);
         } catch (error) {
-          console.error(`Failed to scrape ${url} after retries:`, error);
-          productDataArray.push({
-            url,
-            productId: "",
-            brand: "",
-            title: "",
-            price: null,
-            currency: "TRY",
-            images: "",
-            rating: null,
-            specifications: [],
-            categories: "",
-            description: "",
-            error: error.message,
-          });
+          logProgress(
+            "MAIN",
+            `Failed to scrape ${url}: ${error.message}, skipping`
+          );
+          productDataArray.push({ url, error: error.message });
           saveUrlsToFile(productDataArray, outputFileName);
+        } finally {
+          await productPage.close().catch(() => {});
+          triggerGC();
+          await delay(4000);
+          productCount++;
         }
-
-        await productPage.close();
-        triggerGC();
-        logProgress(
-          "MAIN",
-          `Closed product page for ${url}. Waiting 4 seconds before next product...`
-        );
-        await delay(4000); // Increased to 4 seconds
-        productCount++;
-        logMemoryUsage();
       }
-
-      logProgress(
-        "MAIN",
-        `Completed ${baseUrl}: ${productDataArray.length} entries saved to ${outputFileName}`
-      );
     }
   } catch (error) {
     console.error("[FATAL] Fatal error:", error);
   } finally {
-    if (browser && browser.isConnected()) {
+    if (browser && browser.process() != null) {
       logProgress("MAIN", "Closing browser in finally block...");
-      await browser.close();
+      await browser.close().catch(() => {});
       triggerGC();
-      logProgress("MAIN", "Browser closed");
     }
     process.exit(0);
   }
 };
 
-// Enable garbage collection check
 if (typeof global.gc === "undefined") {
   console.log(
     "Run with --expose-gc to enable manual garbage collection: node --expose-gc sephora.js <url>"
