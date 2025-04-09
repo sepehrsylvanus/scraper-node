@@ -209,31 +209,60 @@ const scrapeProductDetails = async (
       await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
 
       const productData = await page.evaluate((url) => {
-        const titleElement = document.querySelector(".product__title");
-        const title = titleElement ? titleElement.textContent.trim() : "";
+        // Title and Brand
+        const titleElement = document.querySelector(
+          ".product-single__title.mb-0"
+        );
+        const brandElement = titleElement?.querySelector("a");
+        const titleSpan = titleElement?.querySelector("span");
+        const brand = brandElement ? brandElement.textContent.trim() : "";
+        const title = titleSpan ? titleSpan.textContent.trim() : "";
 
+        // Price
         const priceElement = document.querySelector(
-          ".product-price__price span"
+          ".evecard-text-color span[content]"
         );
         const priceText = priceElement ? priceElement.textContent.trim() : "";
         const price = priceText
           ? parseFloat(priceText.replace(/[^\d.,]/g, "").replace(",", "."))
           : null;
 
-        const descriptionElement = document.querySelector(".desc.mt-15");
+        // Currency (assuming ₺ is present next to price)
+        const currencyElement = document.querySelector(".evecard-text-color");
+        const currencySymbol = currencyElement?.textContent.includes("₺")
+          ? "TRY"
+          : "";
+
+        // Description from the first active tab pane
+        const descriptionElement = document.querySelector(
+          ".tab-content .tab-pane.active .pl-4.pr-4"
+        );
         const description = descriptionElement
           ? descriptionElement.textContent.trim()
           : "";
 
-        const vendorElement = document.querySelector(".product-vendor");
-        const brand = vendorElement ? vendorElement.textContent.trim() : "";
+        // Product ID
+        const productIdElement = document.querySelector(
+          ".product-single__sku .label-sku.variant-sku"
+        );
+        const productId = productIdElement
+          ? productIdElement.textContent.trim()
+          : "";
 
-        return { title, price, description, brand };
+        return {
+          brand,
+          title,
+          price,
+          currency: currencySymbol,
+          description,
+          productId,
+        };
       }, url);
 
-      if (!productData.title) throw new Error("No product title found");
+      if (!productData.title || !productData.brand)
+        throw new Error("Missing title or brand");
 
-      return { ...productData, url, currency: "TRY" };
+      return { ...productData, url };
     } catch (error) {
       attempt++;
       logProgress(
