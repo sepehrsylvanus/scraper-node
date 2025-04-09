@@ -144,7 +144,7 @@ const scrollUntilNoMoreContent = async (page, maxScrolls = 50) => {
   }
 };
 
-// Scrape product details
+// Scrape product details from individual product page
 const scrapeProductDetails = async (page, url, retries = 3) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -172,52 +172,50 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
         );
       }
 
+      await page.waitForSelector(".LongName.ProductNameDesktop", {
+        timeout: 30000,
+      });
       await simulateHumanBehavior(page);
 
       const productData = await page.evaluate(() => {
-        const titleElement = document.querySelector(".productName");
+        // Extract title
+        const titleElement = document.querySelector(
+          ".LongName.ProductNameDesktop"
+        );
         const title = titleElement
           ? titleElement.textContent.trim()
           : "Title not found";
 
-        const brandElement = document.querySelector(
-          '[itemprop="brand"] meta[itemprop="name"]'
-        );
-        const brand = brandElement
-          ? brandElement.getAttribute("content")
-          : "Brand not found";
+        // Extract price and currency
+        const priceContainer = document.querySelector(".ProductActualPrice");
+        let price = null;
+        let currency = "";
+        if (priceContainer) {
+          const priceElement = priceContainer.querySelector(".MinPrice");
+          price = priceElement
+            ? parseFloat(priceElement.textContent.trim())
+            : null;
 
-        const priceElement = document.querySelector('[itemprop="price"]');
-        const price = priceElement
-          ? parseFloat(priceElement.getAttribute("content"))
-          : null;
+          const priceText = priceContainer.textContent.trim();
+          currency = priceText
+            .replace(priceElement ? priceElement.textContent : "", "")
+            .trim();
+        }
 
-        const imageElement = document.querySelector("img.lazyImage");
-        const images = imageElement
-          ? imageElement.getAttribute("src") ||
-            imageElement.getAttribute("data-src")
-          : "";
-
-        // Rating not present in provided HTML, leaving as null
+        // Images and rating not requested, leaving as placeholders
+        const images = null;
         const rating = null;
+        const description = null;
 
-        const descriptionElement = document.querySelector(
-          '[itemprop="description"]'
-        );
-        const description = descriptionElement
-          ? descriptionElement.getAttribute("content")
-          : "Description not found";
-
-        return { title, brand, price, images, rating, description };
+        return { title, price, currency, images, rating, description };
       });
 
       cleanupMemory();
       return {
         url,
         title: productData.title,
-        brand: productData.brand,
         price: productData.price,
-        currency: "TL",
+        currency: productData.currency || "TL", // Fallback to "TL" if not found
         images: productData.images,
         rating: productData.rating,
         description: productData.description,
@@ -231,12 +229,11 @@ const scrapeProductDetails = async (page, url, retries = 3) => {
         return {
           url,
           title: "Failed to scrape",
-          brand: null,
           price: null,
           currency: "TL",
-          images: "",
+          images: null,
           rating: null,
-          description: "Failed to scrape",
+          description: null,
         };
       }
       await delay(5000);
@@ -364,12 +361,11 @@ const scrapeInfiniteScrollPage = async (
           productDataArray.push({
             url,
             title: "Failed to scrape",
-            brand: null,
             price: null,
             currency: "TL",
-            images: "",
+            images: null,
             rating: null,
-            description: "Failed to scrape",
+            description: null,
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
