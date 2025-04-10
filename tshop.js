@@ -250,6 +250,20 @@ const scrapeProductDetails = async (
           ? productIdElement.textContent.trim()
           : "";
 
+        // Categories from breadcrumbs
+        const breadcrumbElements = document.querySelectorAll(
+          ".breadcrumbs .breadcrumb-item a"
+        );
+        const categories = Array.from(breadcrumbElements)
+          .map((el) => {
+            // Extract text and remove any inline SVG or extra whitespace
+            const text = el.textContent.trim();
+            // Remove any trailing icons or symbols (e.g., SVG content)
+            return text.replace(/[\n\r]+|\s{2,}/g, " ").split(" ")[0];
+          })
+          .filter((cat) => cat); // Filter out empty categories
+        const categoryString = categories.join(">");
+
         return {
           brand,
           title,
@@ -259,6 +273,7 @@ const scrapeProductDetails = async (
           description,
           productId,
           url,
+          categories: categoryString, // Add categories to the output
         };
       }, url);
 
@@ -277,7 +292,6 @@ const scrapeProductDetails = async (
     }
   }
 };
-
 // Save data to file
 const saveUrlsToFile = (data, filePath) => {
   const filteredData = data.filter((item) => item !== null);
