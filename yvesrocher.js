@@ -16,7 +16,7 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
 
 // Utility to delay execution with randomization
 const delay = (ms) =>
-  new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 1000));
+  new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 100));
 
 // Custom logging function
 const logProgress = (level, message) => {
@@ -70,7 +70,10 @@ const launchBrowser = async (retries = 3) => {
       logProgress("BROWSER", "Browser launched successfully");
       return browser;
     } catch (error) {
-      console.error(`Browser launch attempt ${i + 1} failed:`, error);
+      logProgress(
+        "ERROR",
+        `Browser launch attempt ${i + 1} failed: ${error.message}`
+      );
       if (i === retries - 1) throw error;
       await delay(2000);
     }
@@ -215,7 +218,6 @@ const scrapeProductDetails = async (
           await variant.click();
           await delay(1000); // Wait for the slider image to update
 
-          // Extract the image src from the slider
           const imageSrc = await page.evaluate(() => {
             const img = document.querySelector(".slider-single .picture_image");
             return img ? img.getAttribute("src") : null;
@@ -226,7 +228,6 @@ const scrapeProductDetails = async (
           }
         }
       } else {
-        // Fallback: Grab the initial image if no variants
         const fallbackImage = await page.evaluate(() => {
           const img = document.querySelector(".slider-single .picture_image");
           return img ? img.getAttribute("src") : null;
@@ -234,8 +235,62 @@ const scrapeProductDetails = async (
         if (fallbackImage) imageUrls.push(fallbackImage);
       }
 
+      // Scroll to reviews section and open accordion
+      let rating = null;
+      try {
+        await page.waitForSelector("#BVRRSection", { timeout: 10000 });
+        await page.evaluate(() => {
+          const reviewsSection = document.querySelector("#BVRRSection");
+          if (reviewsSection) {
+            reviewsSection.scrollIntoView({
+              behavior: "smooth",
+              block: "center",
+            });
+          }
+        });
+        await delay(2000); // Wait for scroll
+
+        // Check if accordion is collapsed and open it
+        const isAccordionCollapsed = await page.evaluate(() => {
+          const summary = document.querySelector(
+            "#BVRRSection summary[data-js-summary-accordeon='summary']"
+          );
+          if (summary) {
+            const isCollapsed =
+              !summary.parentElement.classList.contains("open");
+            if (isCollapsed) summary.click();
+            return isCollapsed;
+          }
+          return false;
+        });
+
+        if (isAccordionCollapsed) {
+          await delay(3000); // Wait for accordion to open
+        }
+
+        // Wait for rating element and extract
+        await page.waitForSelector(".bv-rating-ratio-number .bv-rating", {
+          timeout: 10000,
+        });
+        rating = await page.evaluate(() => {
+          const ratingElement = document.querySelector(
+            ".bv-rating-ratio-number .bv-rating span[aria-hidden='true']"
+          );
+          return ratingElement ? ratingElement.textContent.trim() : null;
+        });
+        logProgress(
+          "PRODUCT_SCRAPING",
+          `Extracted rating: ${rating || "None"}`
+        );
+      } catch (error) {
+        logProgress(
+          "PRODUCT_SCRAPING",
+          `Failed to extract rating: ${error.message}`
+        );
+      }
+
       const productData = await page.evaluate(
-        (url, imageUrls) => {
+        (url, imageUrls, rating) => {
           const brand = "Yves Rocher";
 
           const titleElement = document.querySelector("h1.text_XXXL");
@@ -284,10 +339,12 @@ const scrapeProductDetails = async (
             productId,
             url,
             categories: categoryString,
+            rating,
           };
         },
         url,
-        imageUrls
+        imageUrls,
+        rating
       );
 
       if (!productData.title) throw new Error("Missing title");
@@ -327,7 +384,7 @@ const loadExistingUrls = (baseUrl, dir) => {
       const data = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
       data.forEach((entry) => entry?.url && existingUrls.add(entry.url));
     } catch (error) {
-      console.error(`Error reading ${file}:`, error.message);
+      logProgress("FILE", `Error reading ${file}: ${error.message}`);
     }
   }
   return existingUrls;
@@ -409,20 +466,22 @@ const scrapeWebsite = async () => {
             url,
             browser
           );
-          if (productData) productDataArray.push(productData);
-          saveUrlsToFile(productDataArray, outputFileName);
+          if (productData) {
+            productDataArray.push(productData);
+            saveUrlsToFile(productDataArray, outputFileName);
+          }
         } catch (error) {
           logProgress("MAIN", `Failed to scrape ${url}: ${error.message}`);
         } finally {
           await productPage.close().catch(() => {});
           triggerGC();
-          await delay(4000);
+          await delay(2000);
           productCount++;
         }
       }
     }
   } catch (error) {
-    console.error("[FATAL] Fatal error:", error);
+    logProgress("FATAL", `Fatal error: ${error.message}`);
   } finally {
     if (browser && browser.process() != null) {
       await browser.close().catch(() => {});
