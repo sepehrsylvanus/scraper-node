@@ -1,5 +1,6 @@
 const puppeteer = require("puppeteer");
 const fs = require("fs");
+const XLSX = require("xlsx"); // Added for Excel file creation
 
 async function getCredentials() {
   return new Promise((resolve) => {
@@ -118,20 +119,15 @@ async function scrapeComments() {
     // Final comment collection
     const finalComments = await checkComments();
     finalComments.sort((a, b) => b.words - a.words);
-    fs.writeFileSync(
-      "comments.txt",
-      JSON.stringify(
-        finalComments.map((c) => ({
-          id: c.id,
-          words: c.words,
-          comment: c.comment,
-        })),
-        null,
-        2
-      ),
-      "utf8"
-    );
-    console.log(`Total comments saved: ${finalComments.length}`);
+
+    // Create Excel file with only IDs
+    const idData = finalComments.map((c) => ({ id: c.id }));
+    const worksheet = XLSX.utils.json_to_sheet(idData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Comments");
+    XLSX.writeFile(workbook, "comments.xlsx");
+
+    console.log(`Total IDs saved to comments.xlsx: ${finalComments.length}`);
 
     if (global.gc) global.gc();
   } catch (error) {

@@ -70,7 +70,10 @@ const launchBrowser = async (retries = 3) => {
       logProgress("BROWSER", "Browser launched successfully");
       return browser;
     } catch (error) {
-      console.error(`Browser launch attempt ${i + 1} failed:`, error);
+      logProgress(
+        "BROWSER",
+        `Browser launch attempt ${i + 1} failed: ${error}`
+      );
       if (i === retries - 1) throw error;
       await delay(2000);
     }
@@ -95,7 +98,7 @@ const extractProductUrls = async (page, baseUrl) => {
     await page.waitForSelector(acceptButtonSelector, { timeout: 10000 });
     await page.click(acceptButtonSelector);
     logProgress("URL_COLLECTION", "Clicked 'Kabul Et' button");
-    await delay(2000); // Wait for popup to disappear
+    await delay(2000);
   } catch (error) {
     logProgress(
       "URL_COLLECTION",
@@ -103,7 +106,7 @@ const extractProductUrls = async (page, baseUrl) => {
     );
   }
 
-  // Extract total product count from #filter-section
+  // Extract total product count
   const totalProducts = await page.evaluate(() => {
     const totalElement = document.querySelector(
       "#filter-section .mr-4.font-500.d-md-block"
@@ -114,43 +117,50 @@ const extractProductUrls = async (page, baseUrl) => {
   });
   logProgress("URL_COLLECTION", `Total products expected: ${totalProducts}`);
 
-  // Infinite scroll with loading layer detection
+  // Infinite scroll
+  let previousHeight = 0;
   while (!shouldStop) {
     try {
       await page.evaluate(async () => {
-        let currentPosition = 0;
-        const scrollStep = 500;
-        const maxHeight = document.body.scrollHeight;
-
-        while (currentPosition < maxHeight) {
-          window.scrollBy(0, scrollStep);
-          currentPosition += scrollStep;
-          await new Promise((resolve) => setTimeout(resolve, 500)); // Half second delay
-        }
+        window.scrollTo(0, document.body.scrollHeight);
       });
 
-      // Check for loading layer and wait until it disappears
+      // Wait for new content to load
+      await page
+        .waitForFunction(`document.body.scrollHeight > ${previousHeight}`, {
+          timeout: 10000,
+        })
+        .catch(() => {});
+
+      previousHeight = await page.evaluate(() => document.body.scrollHeight);
+
+      // Check for loading indicators
       let isLoading = await page.evaluate(() => {
-        const loadingLayer = document.querySelector("[LOADING_LAYER_SELECTOR]"); // Replace with actual selector
-        return loadingLayer && loadingLayer.style.display !== "none";
+        const loaders = document.querySelectorAll(
+          ".loading, .spinner, [class*='loader'], [style*='display: block']"
+        );
+        return Array.from(loaders).some(
+          (el) => el.offsetParent !== null && el.style.display !== "none"
+        );
       });
 
       while (isLoading && !shouldStop) {
         logProgress(
           "URL_COLLECTION",
-          "Loading layer detected, pausing scroll..."
+          "Loading indicator detected, pausing scroll..."
         );
-        await delay(1000); // Check every second
+        await delay(1000);
         isLoading = await page.evaluate(() => {
-          const loadingLayer = document.querySelector(
-            "[LOADING_LAYER_SELECTOR]"
+          const loaders = document.querySelectorAll(
+            ".loading, .spinner, [class*='loader'], [style*='display: block']"
           );
-          return loadingLayer && loadingLayer.style.display !== "none";
+          return Array.from(loaders).some(
+            (el) => el.offsetParent !== null && el.style.display !== "none"
+          );
         });
       }
-      logProgress("URL_COLLECTION", "Loading layer gone, resuming scroll...");
 
-      // Collect current URLs after each scroll
+      // Collect URLs
       const currentUrls = await page.evaluate(() => {
         const productElements = document.querySelectorAll(
           ".product--item .thumbnail-container a[data-discover='true']"
@@ -167,13 +177,11 @@ const extractProductUrls = async (page, baseUrl) => {
         `Collected ${allProductUrls.size}/${totalProducts} unique URLs`
       );
 
-      // Break if no new URLs are loaded (end of infinite scroll)
+      // Break conditions
       if (allProductUrls.size === previousSize) {
         logProgress("URL_COLLECTION", "No new products loaded, ending scroll");
         break;
       }
-
-      // Optional: Break if we’ve collected all expected products
       if (totalProducts && allProductUrls.size >= totalProducts) {
         logProgress(
           "URL_COLLECTION",
@@ -194,13 +202,8 @@ const extractProductUrls = async (page, baseUrl) => {
   return Array.from(allProductUrls);
 };
 
-// Scrape product details including image URLs and categories
-const scrapeProductDetails = async (
-  page,
-  url,
-  browserInstance,
-  maxRetries = 3
-) => {
+// Scrape product details
+const scrapeProductDetails = async (page, url, maxRetries = 3) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
   let attempt = 0;
 
@@ -209,7 +212,6 @@ const scrapeProductDetails = async (
       await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
 
       const productData = await page.evaluate((url) => {
-        // Title and Brand
         const titleElement = document.querySelector(
           ".product-single__title.mb-0"
         );
@@ -218,7 +220,6 @@ const scrapeProductDetails = async (
         const brand = brandElement ? brandElement.textContent.trim() : "";
         const title = titleSpan ? titleSpan.textContent.trim() : "";
 
-        // Price
         const priceElement = document.querySelector(
           ".evecard-text-color span[content]"
         );
@@ -227,13 +228,11 @@ const scrapeProductDetails = async (
           ? parseFloat(priceText.replace(/[^\d.,]/g, "").replace(",", "."))
           : null;
 
-        // Currency (assuming ₺ is present next to price)
         const currencyElement = document.querySelector(".evecard-text-color");
         const currencySymbol = currencyElement?.textContent.includes("₺")
           ? "TRY"
           : "";
 
-        // Description from the first active tab pane
         const descriptionElement = document.querySelector(
           ".tab-content .tab-pane.active .pl-4.pr-4"
         );
@@ -241,7 +240,6 @@ const scrapeProductDetails = async (
           ? descriptionElement.textContent.trim()
           : "";
 
-        // Product ID
         const productIdElement = document.querySelector(
           ".product-single__sku .label-sku.variant-sku"
         );
@@ -249,7 +247,6 @@ const scrapeProductDetails = async (
           ? productIdElement.textContent.trim()
           : "";
 
-        // Image URLs (semicolon-separated string)
         const imageUrls = [];
         const badgeImage = document.querySelector(
           ".product-detail-badge-image img"
@@ -263,7 +260,6 @@ const scrapeProductDetails = async (
         });
         const images = imageUrls.join(";");
 
-        // Categories from breadcrumb (excluding Anasayfa and last item with product name)
         const breadcrumbItems = document.querySelectorAll(
           ".breadcrumb li span[itemprop='name']"
         );
@@ -271,7 +267,7 @@ const scrapeProductDetails = async (
           .map((item) => item.textContent.trim())
           .filter(
             (cat, index, arr) => cat !== "Anasayfa" && index !== arr.length - 1
-          ); // Skip home and last item
+          );
         const categories = categoriesArray.join(">");
 
         return {
@@ -286,8 +282,9 @@ const scrapeProductDetails = async (
         };
       }, url);
 
-      if (!productData.title || !productData.brand)
+      if (!productData.title || !productData.brand) {
         throw new Error("Missing title or brand");
+      }
 
       return { ...productData, url };
     } catch (error) {
@@ -325,7 +322,7 @@ const loadExistingUrls = (baseUrl, dir) => {
       const data = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
       data.forEach((entry) => entry?.url && existingUrls.add(entry.url));
     } catch (error) {
-      console.error(`Error reading ${file}:`, error.message);
+      logProgress("FILE", `Error reading ${file}: ${error.message}`);
     }
   }
   return existingUrls;
@@ -344,7 +341,6 @@ const scrapeWebsite = async () => {
     if (!fs.existsSync(siteDir)) fs.mkdirSync(siteDir, { recursive: true });
 
     browser = await launchBrowser();
-    const productsPerBrowserRestart = 50;
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing base URL: ${baseUrl}`);
@@ -373,26 +369,12 @@ const scrapeWebsite = async () => {
       triggerGC();
 
       logProgress("MAIN", `Found ${productUrls.length} product URLs`);
-      let productCount = 0;
 
-      for (const url of productUrls) {
+      for (let i = 0; i < productUrls.length; i++) {
+        const url = productUrls[i];
         if (processedUrls.has(url)) {
           logProgress("MAIN", `Skipping already processed URL: ${url}`);
           continue;
-        }
-
-        if (
-          productCount > 0 &&
-          productCount % productsPerBrowserRestart === 0
-        ) {
-          logProgress(
-            "MAIN",
-            `Restarting browser after ${productCount} products...`
-          );
-          await browser.close().catch(() => {});
-          triggerGC();
-          await delay(3000);
-          browser = await launchBrowser();
         }
 
         const productPage = await browser.newPage();
@@ -402,22 +384,36 @@ const scrapeWebsite = async () => {
         );
 
         try {
-          const productData = await scrapeProductDetails(
-            productPage,
-            url,
-            browser
+          const productData = await scrapeProductDetails(productPage, url);
+          if (productData) {
+            productDataArray.push(productData);
+            processedUrls.add(url);
+            saveUrlsToFile(productDataArray, outputFileName);
+          }
+          logProgress(
+            "MAIN",
+            `Processed ${i + 1}/${productUrls.length} products`
           );
-          if (productData) productDataArray.push(productData);
-          saveUrlsToFile(productDataArray, outputFileName);
         } catch (error) {
           logProgress("MAIN", `Failed to scrape ${url}: ${error.message}`);
         } finally {
           await productPage.close().catch(() => {});
           triggerGC();
-          await delay(4000);
-          productCount++;
+          await delay(2000);
+        }
+
+        // Optional: Restart browser every 100 products to manage memory
+        if ((i + 1) % 100 === 0) {
+          logProgress("MAIN", `Restarting browser after ${i + 1} products...`);
+          await browser.close().catch(() => {});
+          triggerGC();
+          await delay(3000);
+          browser = await launchBrowser();
         }
       }
+
+      logProgress("MAIN", `Completed processing for ${baseUrl}`);
+      saveUrlsToFile(productDataArray, outputFileName);
     }
   } catch (error) {
     console.error("[FATAL] Fatal error:", error);
@@ -426,6 +422,7 @@ const scrapeWebsite = async () => {
       await browser.close().catch(() => {});
       triggerGC();
     }
+    logProgress("MAIN", "Scraping completed");
     process.exit(0);
   }
 };
