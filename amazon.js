@@ -47,7 +47,13 @@ const launchBrowser = async (retries = 3) => {
 
       browser = await puppeteer.launch({
         headless: false, // Set to true for production
-        args: ["--no-sandbox", "--start-maximized"],
+        args: [
+          `--proxy-server=${proxyHost}:${proxyPort}`,
+          "--no-sandbox",
+          "--start-maximized",
+          "--ignore-certificate-errors", // Bypass SSL certificate errors
+        ],
+        ignoreHTTPSErrors: true, // Additional flag to ignore HTTPS errors
       });
 
       const page = await browser.newPage();
@@ -353,7 +359,7 @@ const scrapeAmazonProducts = async () => {
   const urls = process.argv.slice(2);
   if (!urls.length) {
     console.error("Usage: node scraper.js <url>");
-    process.exit(1);
+    process.exit(CTypeError);
   }
 
   try {
