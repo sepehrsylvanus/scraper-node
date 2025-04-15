@@ -1,6 +1,12 @@
-const { firefox } = require("playwright"); // Use Playwright instead of Puppeteer
+const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
+
+const username = "brd-customer-hl_39926417-zone-sylvanus";
+const password = "ls60pzr5wtn2";
+const proxyHost = "brd.superproxy.io";
+const proxyPort = 22225;
+const session_id = (10000000 * Math.random()) | 0;
 
 const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(outputDir)) {
@@ -33,29 +39,35 @@ const getRandomUserAgent = () => {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 };
 
-// Launch Firefox browser
+// Launch browser with Bright Data proxy
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
-      logProgress("BROWSER", `Launching Firefox (attempt ${i + 1})...`);
-      browser = await firefox.launch({
+      logProgress("BROWSER", `Launching browser (attempt ${i + 1})...`);
+
+      browser = await puppeteer.launch({
         headless: false, // Set to true for production
-        firefoxUserPrefs: {
-          "network.protocol-handler.warn-external.http": false,
-          "network.protocol-handler.warn-external.https": false,
-        },
         args: ["--no-sandbox", "--start-maximized"],
       });
 
-      const context = await browser.newContext({
-        viewport: null,
-        userAgent: getRandomUserAgent(),
+      const page = await browser.newPage();
+
+      // Set proxy authentication
+      await page.authenticate({
+        username: `${username}-session-${session_id}`,
+        password,
       });
 
-      logProgress("BROWSER", "Firefox launched successfully");
-      return context; // Return context instead of browser directly
+      // Set user agent
+      await page.setUserAgent(getRandomUserAgent());
+
+      logProgress("BROWSER", "Browser launched successfully");
+      return page;
     } catch (error) {
-      console.error(`Browser launch attempt ${i + 1} failed:`, error);
+      logProgress(
+        "BROWSER",
+        `Browser launch attempt ${i + 1} failed: ${error}`
+      );
       if (i === retries - 1) throw error;
       await delay(2000);
     }
@@ -348,9 +360,6 @@ const scrapeAmazonProducts = async () => {
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
 
-    const context = await launchBrowser();
-    browser = context.browser(); // Store browser reference for cleanup
-
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing URL: ${baseUrl}`);
       let processedUrls = loadExistingUrls(baseUrl, amazonDir);
@@ -383,7 +392,7 @@ const scrapeAmazonProducts = async () => {
         }
       }
 
-      const page = await context.newPage();
+      const page = await launchBrowser();
       await scrapePageByPage(
         page,
         baseUrl,
