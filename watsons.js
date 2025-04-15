@@ -34,20 +34,10 @@ const launchBrowser = async () => {
   try {
     if (browser && browser.isConnected()) return browser;
     const browserInstance = await puppeteer.launch({
-      headless: true,
+      headless: false, // Reverted to original non-headless mode
       protocolTimeout: 86400000,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--disable-gpu",
-      ],
-      timeout: 120000,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
-    // Trigger GC after browser launch
     triggerGarbageCollection();
     return browserInstance;
   } catch (error) {
@@ -80,7 +70,7 @@ const scrollUntilVisible = async (page, selector) => {
         isVisible = true;
       } else {
         await page.evaluate(() => window.scrollBy(0, window.innerHeight / 2));
-        await delay(500);
+        await delay(1000);
         scrollAttempts++;
       }
     }
@@ -124,7 +114,9 @@ const extractItems = async (page) => {
         .filter((item) => item !== null);
     });
     console.log(`Extracted ${items.length} product URLs from current page`);
-    // Trigger GC after extracting items
+    items.forEach((item, index) =>
+      console.log(`Item ${index + 1}: ${item.url}, In Stock: ${item.existence}`)
+    );
     triggerGarbageCollection();
     return items;
   } catch (error) {
@@ -140,24 +132,8 @@ const scrapeProductDetails = async (page, item, retries = 2) => {
       console.log(
         `Scraping product (Attempt ${attempt}/${retries + 1}): ${url}`
       );
-      await page.setRequestInterception(true);
-      page.on("request", (request) => {
-        if (
-          ["image", "stylesheet", "font", "media"].includes(
-            request.resourceType()
-          )
-        ) {
-          request.abort();
-        } else {
-          request.continue();
-        }
-      });
-
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 90000,
-      });
-      await delay(1000);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 }); // Reverted to original settings
+      await delay(2000);
 
       const details = await page.evaluate((productUrl) => {
         const priceElement = document.querySelector(
@@ -245,7 +221,6 @@ const scrapeProductDetails = async (page, item, retries = 2) => {
           fullDetails.existence
         }`
       );
-      // Trigger GC after scraping details
       triggerGarbageCollection();
       return fullDetails;
     } catch (error) {
@@ -256,10 +231,7 @@ const scrapeProductDetails = async (page, item, retries = 2) => {
       if (attempt === retries + 1) {
         return { url, existence, error: error.message };
       }
-      await delay(2000);
-    } finally {
-      page.removeAllListeners("request");
-      await page.setRequestInterception(false);
+      await delay(3000);
     }
   }
 };
@@ -278,19 +250,22 @@ const scrapePagination = async (page, baseUrl) => {
   let allItems = [];
 
   console.log(`Starting with URL: ${baseUrl}`);
-  await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await delay(2000);
+  await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 60000 });
+  await delay(3000);
 
   // Handle cookie consent modal
   const acceptButtonSelector = "#onetrust-accept-btn-handler";
   try {
-    await page.waitForSelector(acceptButtonSelector, { timeout: 5000 });
+    await page.waitForSelector(acceptButtonSelector, { timeout: 10000 });
     console.log("Cookie consent modal detected. Clicking 'kabul et'...");
     await page.click(acceptButtonSelector);
-    await delay(500);
+    await delay(1000);
     console.log("Modal closed successfully.");
   } catch (error) {
-    console.log("No cookie consent modal found or error:", error.message);
+    console.error(
+      "Error handling cookie consent modal or modal not found:",
+      error
+    );
   }
 
   const totalItems = await page.evaluate(() => {
@@ -319,11 +294,12 @@ const scrapePagination = async (page, baseUrl) => {
       `Scraping page ${currentPage} (Items collected so far: ${allItems.length}/${totalItems})`
     );
 
+    // Scroll from top to bottom to load all items
     let previousHeight = 0;
     let currentHeight = await page.evaluate(() => document.body.scrollHeight);
     while (previousHeight < currentHeight) {
       await page.evaluate(() => window.scrollBy(0, 500));
-      await delay(1000);
+      await delay(3000);
       previousHeight = currentHeight;
       currentHeight = await page.evaluate(() => document.body.scrollHeight);
     }
@@ -379,16 +355,23 @@ const scrapePagination = async (page, baseUrl) => {
 
     console.log(`Clicking next button on page ${currentPage}`);
     try {
-      await Promise.all([
-        page.click(nextButtonSelector),
-        page.waitForNavigation({
-          waitUntil: "domcontentloaded",
-          timeout: 90000,
-        }),
-      ]);
-      await delay(1000);
+      await page.click(nextButtonSelector);
+      await page.waitForFunction(
+        () => document.querySelectorAll("div.product-tile").length > 0,
+        { timeout: 60000 }
+      );
+      await delay(3000);
+
       await page.evaluate(() => window.scrollTo(0, 0));
-      // Trigger GC after page navigation
+      await delay(1000);
+      previousHeight = 0;
+      currentHeight = await page.evaluate(() => document.body.scrollHeight);
+      while (previousHeight < currentHeight) {
+        await page.evaluate(() => window.scrollBy(0, 500));
+        await delay(3000);
+        previousHeight = currentHeight;
+        currentHeight = await page.evaluate(() => document.body.scrollHeight);
+      }
       triggerGarbageCollection();
     } catch (error) {
       console.error(
@@ -436,7 +419,6 @@ const scrapeMultipleUrls = async () => {
 
       const { items, outputFileName } = await scrapePagination(page, baseUrl);
       await page.close();
-      // Trigger GC after closing page
       triggerGarbageCollection();
 
       const productPage = await browser.newPage();
@@ -463,14 +445,12 @@ const scrapeMultipleUrls = async () => {
           );
           shouldStop = true;
         }
-        // Trigger GC after each product
         triggerGarbageCollection();
       }
 
       await productPage.close();
       console.log(`Finished scraping for: ${baseUrl}\n`);
       shouldStop = false;
-      // Trigger GC after finishing URL
       triggerGarbageCollection();
     }
 
@@ -481,7 +461,6 @@ const scrapeMultipleUrls = async () => {
     if (browser) {
       await browser.close();
     }
-    // Trigger final GC
     triggerGarbageCollection();
     console.log("Browser closed. Exiting program.");
     process.exit(0);
@@ -492,7 +471,6 @@ process.on("SIGINT", async () => {
   console.log("Received SIGINT. Shutting down gracefully...");
   shouldStop = true;
   if (browser) await browser.close();
-  // Trigger GC during shutdown
   triggerGarbageCollection();
   process.exit(0);
 });
