@@ -8,6 +8,11 @@ if (!fs.existsSync(outputDir)) {
 }
 
 let browser;
+let pagePool = []; // Track open pages
+const MAX_MEMORY_MB = 2048; // Max memory threshold (2GB)
+const MAX_PAGES = 5; // Max concurrent pages
+const MEMORY_CHECK_INTERVAL = 30000; // Check memory every 30 seconds
+const PAGE_IDLE_TIMEOUT = 60000; // Close pages idle for 60 seconds
 
 const today = new Date();
 const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
@@ -37,23 +42,149 @@ const getRandomUserAgent = () => {
 const loadProxies = () => {
   const proxyFile = path.join(outputDir, "proxies.json");
   if (fs.existsSync(proxyFile)) {
-    return JSON.parse(fs.readFileSync(proxyFile, "utf8"));
+    try {
+      const proxies = JSON.parse(fs.readFileSync(proxyFile, "utf8"));
+      if (Array.isArray(proxies) && proxies.length > 0) {
+        logProgress(
+          "PROXY",
+          `Loaded ${proxies.length} proxies from proxies.json`
+        );
+        return proxies;
+      }
+      logProgress("PROXY", "proxies.json is empty. Running without proxies.");
+      return [];
+    } catch (error) {
+      logProgress(
+        "PROXY",
+        `Error reading proxies.json: ${error.message}. Running without proxies.`
+      );
+      return [];
+    }
   }
-  throw new Error("No proxies found. Run getProxies.js first.");
+  logProgress("PROXY", "No proxies.json found. Running without proxies.");
+  return [];
+};
+
+// Garbage Collector
+const startGarbageCollector = () => {
+  setInterval(async () => {
+    try {
+      // Check memory usage
+      const memoryUsage = process.memoryUsage().heapUsed / 1024 / 1024; // MB
+      logProgress(
+        "GARBAGE_COLLECTOR",
+        `Memory usage: ${memoryUsage.toFixed(2)} MB`
+      );
+
+      if (memoryUsage > MAX_MEMORY_MB) {
+        logProgress(
+          "GARBAGE_COLLECTOR",
+          "Memory threshold exceeded. Restarting browser..."
+        );
+        await cleanupBrowser();
+        browser = await launchBrowser(loadProxies());
+      }
+
+      // Clean up idle pages
+      const now = Date.now();
+      pagePool = pagePool.filter((pageInfo) => {
+        if (now - pageInfo.lastUsed > PAGE_IDLE_TIMEOUT) {
+          logProgress("GARBAGE_COLLECTOR", `Closing idle page: ${pageInfo.id}`);
+          pageInfo.page
+            .close()
+            .catch((err) =>
+              logProgress(
+                "GARBAGE_COLLECTOR",
+                `Error closing page: ${err.message}`
+              )
+            );
+          return false;
+        }
+        return true;
+      });
+
+      // Force garbage collection if available
+      if (global.gc) {
+        global.gc();
+        logProgress("GARBAGE_COLLECTOR", "Forced garbage collection");
+      }
+    } catch (error) {
+      logProgress(
+        "GARBAGE_COLLECTOR",
+        `Error in garbage collector: ${error.message}`
+      );
+    }
+  }, MEMORY_CHECK_INTERVAL);
+};
+
+// Cleanup browser and pages
+const cleanupBrowser = async () => {
+  try {
+    if (browser && browser.isConnected()) {
+      await Promise.all(
+        pagePool.map((pageInfo) =>
+          pageInfo.page
+            .close()
+            .catch((err) =>
+              logProgress("BROWSER", `Error closing page: ${err.message}`)
+            )
+        )
+      );
+      pagePool = [];
+      await browser.close();
+      logProgress("BROWSER", "Browser closed for cleanup");
+    }
+  } catch (error) {
+    logProgress("BROWSER", `Error during browser cleanup: ${error.message}`);
+  }
+};
+
+// Get or create a page from pool
+const getPage = async () => {
+  if (pagePool.length >= MAX_PAGES) {
+    const oldestPage = pagePool.shift();
+    await oldestPage.page
+      .close()
+      .catch((err) =>
+        logProgress("PAGE", `Error closing old page: ${err.message}`)
+      );
+  }
+
+  const page = await browser.newPage();
+  const pageId = `page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await page.setUserAgent(getRandomUserAgent());
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "en-US,en;q=0.9",
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  });
+
+  pagePool.push({ id: pageId, page, lastUsed: Date.now() });
+  return { page, id: pageId };
+};
+
+// Update page last used time
+const updatePageUsage = (pageId) => {
+  const pageInfo = pagePool.find((p) => p.id === pageId);
+  if (pageInfo) pageInfo.lastUsed = Date.now();
 };
 
 // Launch browser with proxy and retry logic
 const launchBrowser = async (proxies, retries = 3) => {
-  const proxy = proxies[Math.floor(Math.random() * proxies.length)];
+  const proxy = proxies.length
+    ? proxies[Math.floor(Math.random() * proxies.length)]
+    : null;
   for (let i = 0; i < retries; i++) {
     try {
       if (browser && browser.isConnected()) return browser;
       logProgress(
         "BROWSER",
-        `Launching browser with proxy ${proxy} (attempt ${i + 1})...`
+        `Launching browser ${
+          proxy ? `with proxy ${proxy}` : "without proxy"
+        } (attempt ${i + 1})...`
       );
 
-      browser = await puppeteer.launch({
+      const launchOptions = {
         headless: false,
         protocolTimeout: 86400000,
         args: [
@@ -62,15 +193,15 @@ const launchBrowser = async (proxies, retries = 3) => {
           "--start-maximized",
           "--disable-web-security",
           "--disable-features=IsolateOrigins,site-per-process",
-          `--proxy-server=${proxy}`,
         ],
         defaultViewport: null,
-      });
+      };
 
-      const tempPage = await browser.newPage();
-      await tempPage.setUserAgent(getRandomUserAgent());
-      await tempPage.close();
+      if (proxy) {
+        launchOptions.args.push(`--proxy-server=${proxy}`);
+      }
 
+      browser = await puppeteer.launch(launchOptions);
       return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${i + 1} failed:`, error);
@@ -81,8 +212,9 @@ const launchBrowser = async (proxies, retries = 3) => {
 };
 
 // Scrape product details from individual product page
-const scrapeProductDetails = async (page, url) => {
+const scrapeProductDetails = async (page, pageId, url) => {
   logProgress("PRODUCT_SCRAPING", `Navigating to product URL: ${url}`);
+  updatePageUsage(pageId);
 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -247,7 +379,8 @@ const loadExistingUrls = (baseUrl, dir) => {
 
 // Scrape products page by page
 const scrapePageByPage = async (
-  page,
+  mainPage,
+  mainPageId,
   baseUrl,
   processedUrls,
   productDataArray,
@@ -255,13 +388,6 @@ const scrapePageByPage = async (
 ) => {
   let currentPage = 1;
   const maxPages = 10;
-
-  await page.setUserAgent(getRandomUserAgent());
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-US,en;q=0.9",
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-  });
 
   while (currentPage <= maxPages) {
     const currentUrl =
@@ -272,17 +398,20 @@ const scrapePageByPage = async (
     );
 
     try {
-      await page.goto(currentUrl, {
+      await mainPage.goto(currentUrl, {
         waitUntil: "domcontentloaded",
         timeout: 30000,
       });
+      updatePageUsage(mainPageId);
       await delay(2000);
 
       logProgress("PAGE_SCRAPING", `Loaded page ${currentPage}`);
-      await page.waitForSelector(".puis-card-container", { timeout: 10000 });
+      await mainPage.waitForSelector(".puis-card-container", {
+        timeout: 10000,
+      });
       logProgress("PAGE_SCRAPING", "Product cards loaded");
 
-      const productUrls = await page.evaluate(() => {
+      const productUrls = await mainPage.evaluate(() => {
         const productCards = document.querySelectorAll(".puis-card-container");
         return Array.from(productCards)
           .map((card) => {
@@ -300,14 +429,6 @@ const scrapePageByPage = async (
         `Found ${productUrls.length} product URLs on page ${currentPage}`
       );
 
-      const productPage = await browser.newPage();
-      await productPage.setUserAgent(getRandomUserAgent());
-      await productPage.setExtraHTTPHeaders({
-        "Accept-Language": "en-US,en;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-      });
-
       for (const url of productUrls) {
         if (processedUrls.has(url)) {
           logProgress(
@@ -317,8 +438,13 @@ const scrapePageByPage = async (
           continue;
         }
 
+        const { page: productPage, id: productPageId } = await getPage();
         try {
-          const productData = await scrapeProductDetails(productPage, url);
+          const productData = await scrapeProductDetails(
+            productPage,
+            productPageId,
+            url
+          );
           productDataArray.push(productData);
           logProgress(
             "PAGE_SCRAPING",
@@ -346,15 +472,15 @@ const scrapePageByPage = async (
           });
           saveUrlsToFile(productDataArray, outputFileName);
         }
+        await productPage.close();
+        pagePool = pagePool.filter((p) => p.id !== productPageId);
         await delay(500);
       }
-
-      await productPage.close();
 
       let paginationLoaded = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          await page.waitForSelector(
+          await mainPage.waitForSelector(
             "ul.a-unordered-list.a-horizontal.s-unordered-list-accessibility",
             { timeout: 5000 }
           );
@@ -370,7 +496,7 @@ const scrapePageByPage = async (
             `Pagination not found on attempt ${attempt + 1}, retrying...`
           );
           await delay(1000);
-          await page.evaluate(() =>
+          await mainPage.evaluate(() =>
             window.scrollTo(0, document.body.scrollHeight)
           );
         }
@@ -384,7 +510,7 @@ const scrapePageByPage = async (
         break;
       }
 
-      const nextPageUrl = await page.evaluate(() => {
+      const nextPageUrl = await mainPage.evaluate(() => {
         const nextButton = document.querySelector(
           'a.s-pagination-item.s-pagination-next[aria-label^="Sonraki sayfaya git"]'
         );
@@ -405,10 +531,11 @@ const scrapePageByPage = async (
 
       logProgress("PAGE_SCRAPING", `Moving to next page: ${nextPageUrl}`);
       currentPage++;
-      await page.goto(nextPageUrl, {
+      await mainPage.goto(nextPageUrl, {
         waitUntil: "domcontentloaded",
         timeout: 30000,
       });
+      updatePageUsage(mainPageId);
       await delay(2000);
     } catch (error) {
       logProgress(
@@ -430,12 +557,11 @@ const scrapeAmazonProducts = async () => {
 
   try {
     const proxies = loadProxies();
-    if (!proxies.length) throw new Error("No proxies available.");
-
     const amazonDir = path.join(outputDir, "amazon");
     if (!fs.existsSync(amazonDir)) fs.mkdirSync(amazonDir, { recursive: true });
 
     browser = await launchBrowser(proxies);
+    startGarbageCollector(); // Start garbage collector
 
     for (const baseUrl of urls) {
       logProgress("MAIN", `Processing URL: ${baseUrl}`);
@@ -469,15 +595,17 @@ const scrapeAmazonProducts = async () => {
         }
       }
 
-      const page = await browser.newPage();
+      const { page: mainPage, id: mainPageId } = await getPage();
       await scrapePageByPage(
-        page,
+        mainPage,
+        mainPageId,
         baseUrl,
         processedUrls,
         productDataArray,
         outputFileName
       );
-      await page.close();
+      await mainPage.close();
+      pagePool = pagePool.filter((p) => p.id !== mainPageId);
 
       logProgress(
         "MAIN",
@@ -485,14 +613,22 @@ const scrapeAmazonProducts = async () => {
       );
     }
 
-    if (browser) await browser.close();
+    await cleanupBrowser();
     logProgress("MAIN", "Browser closed");
     process.exit(0);
   } catch (error) {
     console.error("[FATAL] Fatal error:", error);
-    if (browser) await browser.close();
+    await cleanupBrowser();
     process.exit(1);
   }
 };
+
+// Enable manual garbage collection if Node.js is run with --expose-gc
+if (typeof global.gc === "undefined") {
+  logProgress(
+    "GARBAGE_COLLECTOR",
+    "Garbage collection not exposed. Run Node.js with --expose-gc for better memory management."
+  );
+}
 
 scrapeAmazonProducts();
