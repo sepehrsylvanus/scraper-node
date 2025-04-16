@@ -14,16 +14,13 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
   "0"
 )}-${String(today.getDate()).padStart(2, "0")}`;
 
-// Utility to delay execution with randomization
 const delay = (ms) =>
   new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 1000));
 
-// Custom logging function
 const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
-// Log memory usage
 const logMemoryUsage = () => {
   const memoryUsage = process.memoryUsage();
   logProgress(
@@ -36,7 +33,6 @@ const logMemoryUsage = () => {
   );
 };
 
-// Trigger garbage collection if available
 const triggerGC = () => {
   if (global.gc) {
     logProgress("GC", "Triggering garbage collection...");
@@ -45,13 +41,13 @@ const triggerGC = () => {
   }
 };
 
-// Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       if (browser && browser.process() != null) {
         logProgress("BROWSER", "Closing existing browser instance...");
         await browser.close();
+        browser = null;
         triggerGC();
         await delay(2000);
       }
@@ -79,7 +75,6 @@ const launchBrowser = async (retries = 3) => {
     }
   }
 };
-
 // Extract product URLs with cookie consent and infinite scroll
 const extractProductUrls = async (page, baseUrl) => {
   logProgress("URL_COLLECTION", `Starting with base URL: ${baseUrl}`);

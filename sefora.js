@@ -16,16 +16,13 @@ const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
   "0"
 )}-${String(today.getDate()).padStart(2, "0")}`;
 
-// Utility to delay execution with randomization
 const delay = (ms) =>
   new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 1000));
 
-// Custom logging function
 const logProgress = (level, message) => {
   process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
 };
 
-// Log memory usage
 const logMemoryUsage = () => {
   const memoryUsage = process.memoryUsage();
   logProgress(
@@ -38,7 +35,6 @@ const logMemoryUsage = () => {
   );
 };
 
-// Trigger garbage collection if available
 const triggerGC = () => {
   if (global.gc) {
     logProgress("GC", "Triggering garbage collection...");
@@ -47,13 +43,13 @@ const triggerGC = () => {
   }
 };
 
-// Launch browser with retry logic
 const launchBrowser = async (retries = 3) => {
   for (let i = 0; i < retries; i++) {
     try {
       if (browser && browser.process() != null) {
         logProgress("BROWSER", "Closing existing browser instance...");
         await browser.close();
+        browser = null;
         triggerGC();
         await delay(2000);
       }
@@ -177,7 +173,7 @@ const extractProductUrls = async (page, baseUrl) => {
   return Array.from(allProductUrls);
 };
 
-// Scrape product details with improved error handling
+// Scrape product details with improved error handling and image scraping
 const scrapeProductDetails = async (
   page,
   url,
@@ -239,6 +235,18 @@ const scrapeProductDetails = async (
           document.querySelector(".description-content.product-description-box")
             ?.innerHTML || "";
 
+        // Extract image URLs from thumbnails and join into a semicolon-separated string
+        const imageElements = document.querySelectorAll(
+          "#thumbnails .elevatezoom-gallery"
+        );
+        const images = Array.from(imageElements)
+          .map((el) => el.getAttribute("data-zoom-image"))
+          .filter((url) => url)
+          .map((url) =>
+            url.startsWith("http") ? url : `https://www.sephora.com.tr${url}`
+          )
+          .join(";");
+
         return {
           productId,
           brand,
@@ -248,6 +256,7 @@ const scrapeProductDetails = async (
           specifications,
           categories,
           description,
+          images,
         };
       }, url);
 
